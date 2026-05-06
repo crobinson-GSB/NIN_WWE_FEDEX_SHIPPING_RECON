@@ -19,13 +19,51 @@ st.markdown("""
     h1 { color: #E8601C !important; font-size: 1.6rem !important; }
     h3 { color: #2B2B2B !important; font-size: 1rem !important; font-weight: 600 !important; }
     p { color: #2B2B2B !important; }
-    .stUploadedFile { border-color: #E8601C !important; }
-    div[data-testid="stFileUploader"] label { font-weight: 600; color: #2B2B2B; }
-    .stButton button { background-color: #E8601C !important; color: white !important;
-                       border: none !important; font-weight: 600 !important;
-                       padding: 0.6rem 2rem !important; border-radius: 6px !important; }
+    div[data-testid="stFileUploader"] {
+        background-color: #ffffff !important;
+        border: 1.5px dashed #CCCCCC !important;
+        border-radius: 8px !important;
+        padding: 0.5rem !important;
+    }
+    div[data-testid="stFileUploader"]:hover {
+        border-color: #E8601C !important;
+    }
+    div[data-testid="stFileUploader"] label {
+        font-weight: 600;
+        color: #2B2B2B !important;
+    }
+    div[data-testid="stFileUploader"] small {
+        color: #777777 !important;
+    }
+    div[data-testid="stMarkdownContainer"] h3 {
+        border-left: 4px solid #E8601C;
+        padding-left: 10px;
+    }
+    div[data-testid="stExpander"] {
+        border: 2px solid #E8601C !important;
+        border-radius: 6px !important;
+    }
+    div[data-testid="stButton"] {
+        display: flex;
+        justify-content: center;
+    }
+    .stButton button {
+        background-color: #E8601C !important;
+        color: white !important;
+        border: none !important;
+        font-weight: 600 !important;
+        padding: 0.75rem 2rem !important;
+        border-radius: 6px !important;
+        width: 100% !important;
+        font-size: 1rem !important;
+    }
     .stButton button:hover { background-color: #c94f14 !important; }
-    div[data-testid="stExpander"] { border: 2px solid #E8601C !important; border-radius: 6px !important; }
+    div[data-testid="stAlert"] {
+        background-color: #FDF3EE !important;
+        border: 1px solid #E8601C !important;
+        border-radius: 6px !important;
+        color: #2B2B2B !important;
+    }
     footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
@@ -35,7 +73,6 @@ st.image("https://gsbdigital.com/wp-content/uploads/2018/06/GSB_DigitalLogo-2015
 st.markdown("</div>", unsafe_allow_html=True)
 st.markdown("# Shipping Reconciliation Tool")
 st.markdown("Automatically match Vision exports against vendor invoices and identify shipping cost discrepancies.")
-st.divider()
 
 with st.expander("How to use this tool", expanded=False):
     st.markdown("""
@@ -69,7 +106,8 @@ Click the download button to get your Excel report. It includes five tabs:
 - Run this each billing cycle when vendor invoices arrive
 - The Mismatches tab is your primary action list
 """)
-st.divider()
+
+st.markdown("<div style='margin-top: 0.25rem;'></div>", unsafe_allow_html=True)
 
 st.markdown("### Vision Export")
 vision_file = st.file_uploader(
@@ -91,7 +129,7 @@ with col3:
 with col4:
     extra_file = st.file_uploader("Additional vendor (optional)", type=["xls", "xlsx", "csv"], key="extra")
 
-st.divider()
+st.markdown("<hr style='border: none; border-top: 1px solid #DDDDDD; margin: 1.5rem 0;'>", unsafe_allow_html=True)
 
 def clean_key(val):
     if pd.isna(val):
