@@ -28,7 +28,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+st.markdown("<div style='padding-top: 2rem;'>", unsafe_allow_html=True)
 st.image("https://gsbdigital.com/wp-content/uploads/2018/06/GSB_DigitalLogo-2015-300x44.png", width=200)
+st.markdown("</div>", unsafe_allow_html=True)
 st.markdown("# Shipping Reconciliation Tool")
 st.markdown("Automatically match Vision exports against vendor invoices and identify shipping cost discrepancies.")
 st.divider()
