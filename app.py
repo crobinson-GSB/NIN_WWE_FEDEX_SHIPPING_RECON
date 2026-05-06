@@ -25,6 +25,7 @@ st.markdown("""
                        border: none !important; font-weight: 600 !important;
                        padding: 0.6rem 2rem !important; border-radius: 6px !important; }
     .stButton button:hover { background-color: #c94f14 !important; }
+    div[data-testid="stExpander"] { border: 2px solid #E8601C !important; border-radius: 6px !important; }
     footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
