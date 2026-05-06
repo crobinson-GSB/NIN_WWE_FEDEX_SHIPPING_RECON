@@ -6,14 +6,12 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="GSB Digital — Shipping Reconciliation",
     page_icon="📦",
     layout="centered"
 )
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .stApp { background-color: #f9f9f9; }
@@ -22,10 +20,6 @@ st.markdown("""
     h3 { color: #2B2B2B !important; font-size: 1rem !important; font-weight: 600 !important; }
     .stUploadedFile { border-color: #E8601C !important; }
     div[data-testid="stFileUploader"] label { font-weight: 600; color: #2B2B2B; }
-    .stat-box { background: white; border-radius: 8px; padding: 1rem; text-align: center;
-                border: 1px solid #eee; margin-bottom: 1rem; }
-    .stat-num { font-size: 2rem; font-weight: 700; }
-    .stat-label { font-size: 0.8rem; color: #777; margin-top: 4px; }
     .stButton button { background-color: #E8601C !important; color: white !important;
                        border: none !important; font-weight: 600 !important;
                        padding: 0.6rem 2rem !important; border-radius: 6px !important; }
@@ -34,7 +28,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Header ────────────────────────────────────────────────────────────────────
 st.image("https://gsbdigital.com/wp-content/uploads/2018/06/GSB_DigitalLogo-2015-300x44.png", width=200)
 st.markdown("# Shipping Reconciliation Tool")
 st.markdown("Automatically match Vision exports against vendor invoices and identify shipping cost discrepancies.")
@@ -74,7 +67,28 @@ Click the download button to get your Excel report. It includes five tabs:
 """)
 st.divider()
 
-# ── Core logic ────────────────────────────────────────────────────────────────
+st.markdown("### Vision Export")
+vision_file = st.file_uploader(
+    "Vision Report (.txt or .xlsx export from Printsmith Vision)",
+    type=["txt", "xlsx"],
+    key="vision"
+)
+
+st.markdown("### Vendor Invoices")
+col1, col2 = st.columns(2)
+with col1:
+    nin_file = st.file_uploader("NIN — Courier (.xls)", type=["xls", "xlsx"], key="nin")
+with col2:
+    wwe_file = st.file_uploader("WWE — UPS (.xls)", type=["xls", "xlsx"], key="wwe")
+
+col3, col4 = st.columns(2)
+with col3:
+    fedex_file = st.file_uploader("FedEx (optional)", type=["xls", "xlsx", "csv"], key="fedex")
+with col4:
+    extra_file = st.file_uploader("Additional vendor (optional)", type=["xls", "xlsx", "csv"], key="extra")
+
+st.divider()
+
 def clean_key(val):
     if pd.isna(val):
         return ''
@@ -136,7 +150,6 @@ def assign_status(row):
         return "MATCH"
     return "VISION ONLY"
 
-# ── Excel builder ─────────────────────────────────────────────────────────────
 ORANGE = "E8601C"
 DARK = "2B2B2B"
 WHITE = "FFFFFF"
@@ -164,18 +177,15 @@ def body(cell, center=False, fill=None, bold=False):
         cell.fill = PatternFill("solid", fgColor=fill)
 
 def build_excel(merged):
-    mismatches   = merged[merged['status'] == 'MISMATCH'].copy()
-    matches      = merged[merged['status'] == 'MATCH'].copy()
-    vision_only  = merged[merged['status'] == 'VISION ONLY'].copy()
+    mismatches = merged[merged['status'] == 'MISMATCH'].copy()
+    matches = merged[merged['status'] == 'MATCH'].copy()
+    vision_only = merged[merged['status'] == 'VISION ONLY'].copy()
     not_in_vision = merged[merged['status'] == 'NOT IN VISION'].copy()
 
     wb = Workbook()
-
-    # ── Summary ──────────────────────────────────────────────────────────────
     ws = wb.active
     ws.title = "Summary"
     ws.sheet_view.showGridLines = False
-
     ws.merge_cells('A1:F1')
     ws['A1'] = "GSB Digital — Shipping Reconciliation Report"
     ws['A1'].font = Font(name="Arial", bold=True, size=16, color=WHITE)
@@ -183,12 +193,8 @@ def build_excel(merged):
     ws['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 40
 
-    stats = [
-        ("MISMATCHES", len(mismatches), "FFCCCC"),
-        ("MATCHED", len(matches), "CCFFCC"),
-        ("NOT IN VISION", len(not_in_vision), "FFF2CC"),
-        ("VISION ONLY", len(vision_only), "E8F4FD"),
-    ]
+    stats = [("MISMATCHES", len(mismatches), "FFCCCC"), ("MATCHED", len(matches), "CCFFCC"),
+             ("NOT IN VISION", len(not_in_vision), "FFF2CC"), ("VISION ONLY", len(vision_only), "E8F4FD")]
     ws.row_dimensions[3].height = 50
     ws.row_dimensions[4].height = 25
     for i, (label, val, bg) in enumerate(stats, 1):
@@ -205,29 +211,15 @@ def build_excel(merged):
 
     nin_disc = mismatches[mismatches['nin_actual_cost'].notna()]
     wwe_disc = mismatches[mismatches['wwe_actual_cost'].notna()]
-
-    ws.row_dimensions[6].height = 22
     ws['A6'] = "Financial Impact"
     ws['A6'].font = Font(name="Arial", bold=True, size=11, color=WHITE)
     ws['A6'].fill = PatternFill("solid", fgColor=DARK)
     ws.merge_cells('A6:F6')
     ws['A6'].alignment = Alignment(horizontal="left", vertical="center")
-
-    fin_headers = ["", "NIN (Courier)", "WWE (UPS)", "Combined", "", ""]
-    for i, h in enumerate(fin_headers, 1):
-        c = ws.cell(row=7, column=i, value=h)
-        c.font = Font(name="Arial", bold=True, size=10, color=WHITE)
-        c.fill = PatternFill("solid", fgColor="444444")
-        c.alignment = Alignment(horizontal="center")
-        c.border = tb()
-
-    fin_rows = [
-        ("Total Vendor Cost", nin_disc['nin_actual_cost'].sum(), wwe_disc['wwe_actual_cost'].sum()),
-        ("Total in Vision",   nin_disc['vision_cost'].sum(),     wwe_disc['vision_cost'].sum()),
-        ("Total Discrepancy", nin_disc['nin_diff'].sum(),         wwe_disc['wwe_diff'].sum()),
-    ]
+    fin_rows = [("Total Vendor Cost", nin_disc['nin_actual_cost'].sum(), wwe_disc['wwe_actual_cost'].sum()),
+                ("Total in Vision", nin_disc['vision_cost'].sum(), wwe_disc['vision_cost'].sum()),
+                ("Total Discrepancy", nin_disc['nin_diff'].sum(), wwe_disc['wwe_diff'].sum())]
     for r, (label, nin_v, wwe_v) in enumerate(fin_rows, 8):
-        ws.row_dimensions[r].height = 22
         ws.cell(row=r, column=1, value=label).font = Font(name="Arial", bold=True, size=10)
         ws.cell(row=r, column=1).fill = PatternFill("solid", fgColor=GRAY_FILL)
         ws.cell(row=r, column=1).border = tb()
@@ -239,12 +231,10 @@ def build_excel(merged):
             if label == "Total Discrepancy":
                 c.font = Font(name="Arial", bold=True, size=10,
                               color="CC0000" if val < 0 else ("006600" if val > 0 else DARK))
-
     for i, w in enumerate([30, 18, 18, 18, 5, 5], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
-    # ── Mismatches ────────────────────────────────────────────────────────────
-    ws2 = wb.create_sheet("⚠ Mismatches")
+    ws2 = wb.create_sheet("Mismatches")
     ws2.sheet_view.showGridLines = False
     ws2.merge_cells('A1:J1')
     ws2['A1'] = "Shipping Cost Mismatches — Action Required"
@@ -252,41 +242,29 @@ def build_excel(merged):
     ws2['A1'].fill = PatternFill("solid", fgColor=ORANGE)
     ws2['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws2.row_dimensions[1].height = 35
-
-    headers = ["GSB Invoice #", "Sales Rep", "Date", "Description",
-               "Vendor", "Vendor Invoice #", "# Shipments",
-               "Vision Cost", "Actual Vendor Cost", "Difference ($)"]
-    ws2.row_dimensions[2].height = 30
-    for i, h in enumerate(headers, 1):
+    for i, h in enumerate(["GSB Invoice #","Sales Rep","Date","Description","Vendor",
+                            "Vendor Invoice #","# Shipments","Vision Cost","Actual Vendor Cost","Difference ($)"], 1):
         hdr(ws2.cell(row=2, column=i, value=h))
-
-    col_w = [16, 14, 12, 35, 12, 18, 12, 18, 20, 16]
-    for i, w in enumerate(col_w, 1):
+    for i, w in enumerate([16,14,12,35,12,18,12,18,20,16], 1):
         ws2.column_dimensions[get_column_letter(i)].width = w
-
     row_n = 3
     for _, r in mismatches.sort_values('vision_invoice').iterrows():
         for vendor, cost, diff, inv, ships in [
-            ("WWE (UPS)", r.get('wwe_actual_cost'), r.get('wwe_diff'),
-             r.get('wwe_invoice_num',''), r.get('wwe_shipments')),
-            ("NIN (Courier)", r.get('nin_actual_cost'), r.get('nin_diff'),
-             r.get('nin_invoice_num',''), r.get('nin_shipments')),
+            ("WWE (UPS)", r.get('wwe_actual_cost'), r.get('wwe_diff'), r.get('wwe_invoice_num',''), r.get('wwe_shipments')),
+            ("NIN (Courier)", r.get('nin_actual_cost'), r.get('nin_diff'), r.get('nin_invoice_num',''), r.get('nin_shipments')),
         ]:
             if pd.notna(cost):
                 fill = RED_FILL if diff < -0.01 else (YELLOW_FILL if diff > 0.01 else GREEN_FILL)
                 row_data = [r['vision_invoice'], r['vision_sales_rep'], r['vision_date'],
                             r['vision_description'], vendor, inv,
-                            int(ships) if pd.notna(ships) else '',
-                            r['vision_cost'], cost, round(diff, 2)]
+                            int(ships) if pd.notna(ships) else '', r['vision_cost'], cost, round(diff, 2)]
                 ws2.row_dimensions[row_n].height = 18
                 for ci, val in enumerate(row_data, 1):
                     c = ws2.cell(row=row_n, column=ci, value=val)
-                    body(c, center=(ci in [1,3,5,6,7,8,9,10]),
-                         fill=fill if ci in [8,9,10] else None)
+                    body(c, center=(ci in [1,3,5,6,7,8,9,10]), fill=fill if ci in [8,9,10] else None)
                     if ci in [8, 9, 10]:
                         c.number_format = '$#,##0.00'
                 row_n += 1
-
     ws2.row_dimensions[row_n].height = 22
     ws2.cell(row=row_n, column=7, value="TOTALS").font = Font(name="Arial", bold=True, size=10)
     ws2.cell(row=row_n, column=7).alignment = Alignment(horizontal="right")
@@ -299,8 +277,7 @@ def build_excel(merged):
         c.border = tb()
         c.alignment = Alignment(horizontal="center")
 
-    # ── Matched ───────────────────────────────────────────────────────────────
-    ws3 = wb.create_sheet("✓ Matched")
+    ws3 = wb.create_sheet("Matched")
     ws3.sheet_view.showGridLines = False
     ws3.merge_cells('A1:I1')
     ws3['A1'] = "Verified Matches — No Action Required"
@@ -308,13 +285,11 @@ def build_excel(merged):
     ws3['A1'].fill = PatternFill("solid", fgColor="2E7D32")
     ws3['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws3.row_dimensions[1].height = 35
-
-    for i, h in enumerate(["GSB Invoice #","Sales Rep","Date","Vendor",
-                            "Vendor Invoice #","Vision Cost","Vendor Cost","Difference","Status"], 1):
+    for i, h in enumerate(["GSB Invoice #","Sales Rep","Date","Vendor","Vendor Invoice #",
+                            "Vision Cost","Vendor Cost","Difference","Status"], 1):
         hdr(ws3.cell(row=2, column=i, value=h), bg="2E7D32")
     for i, w in enumerate([16,14,12,14,18,18,16,14,10], 1):
         ws3.column_dimensions[get_column_letter(i)].width = w
-
     row_n3 = 3
     for _, r in matches.sort_values('vision_invoice').iterrows():
         for vendor, cost, diff in [
@@ -323,19 +298,15 @@ def build_excel(merged):
         ]:
             if pd.notna(cost):
                 ws3.row_dimensions[row_n3].height = 18
-                for ci, val in enumerate([r['vision_invoice'], r['vision_sales_rep'],
-                                          r['vision_date'], vendor, '',
-                                          r['vision_cost'], cost,
-                                          round(diff, 2), "✓"], 1):
+                for ci, val in enumerate([r['vision_invoice'], r['vision_sales_rep'], r['vision_date'],
+                                          vendor, '', r['vision_cost'], cost, round(diff, 2), "✓"], 1):
                     c = ws3.cell(row=row_n3, column=ci, value=val)
-                    body(c, center=(ci in [1,3,4,5,6,7,8,9]),
-                         fill=GREEN_FILL if ci == 9 else None)
+                    body(c, center=(ci in [1,3,4,5,6,7,8,9]), fill=GREEN_FILL if ci == 9 else None)
                     if ci in [6, 7, 8]:
                         c.number_format = '$#,##0.00'
                 row_n3 += 1
 
-    # ── Not in Vision ─────────────────────────────────────────────────────────
-    ws4 = wb.create_sheet("⚡ Not in Vision")
+    ws4 = wb.create_sheet("Not in Vision")
     ws4.sheet_view.showGridLines = False
     ws4.merge_cells('A1:H1')
     ws4['A1'] = "Vendor Charges Not Found in Vision — Review Required"
@@ -343,13 +314,11 @@ def build_excel(merged):
     ws4['A1'].fill = PatternFill("solid", fgColor="B8860B")
     ws4['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws4.row_dimensions[1].height = 35
-
-    for i, h in enumerate(["Reference Key","Vendor","Vendor Invoice #",
-                            "# Shipments","Vendor Cost","Notes","Resolved?"], 1):
+    for i, h in enumerate(["Reference Key","Vendor","Vendor Invoice #","# Shipments",
+                            "Vendor Cost","Notes","Resolved?"], 1):
         hdr(ws4.cell(row=2, column=i, value=h), bg="B8860B")
     for i, w in enumerate([18,14,18,12,14,35,12], 1):
         ws4.column_dimensions[get_column_letter(i)].width = w
-
     row_n4 = 3
     for _, r in not_in_vision.sort_values('key').iterrows():
         for vendor, cost, ships, inv in [
@@ -362,13 +331,11 @@ def build_excel(merged):
                                           int(ships) if pd.notna(ships) else '',
                                           cost, "Invoice not matched in Vision", ""], 1):
                     c = ws4.cell(row=row_n4, column=ci, value=val)
-                    body(c, center=(ci in [2,3,4,5,7]),
-                         fill=YELLOW_FILL if ci in [1,2,5] else None)
+                    body(c, center=(ci in [2,3,4,5,7]), fill=YELLOW_FILL if ci in [1,2,5] else None)
                     if ci == 5:
                         c.number_format = '$#,##0.00'
                 row_n4 += 1
 
-    # ── Vision Only ───────────────────────────────────────────────────────────
     ws5 = wb.create_sheet("Vision Only")
     ws5.sheet_view.showGridLines = False
     ws5.merge_cells('A1:G1')
@@ -377,19 +344,16 @@ def build_excel(merged):
     ws5['A1'].fill = PatternFill("solid", fgColor="455A64")
     ws5['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws5.row_dimensions[1].height = 35
-
     for i, h in enumerate(["GSB Invoice #","Sales Rep","Date","Description",
                             "Amount Billed","Cost Recorded","Notes"], 1):
         hdr(ws5.cell(row=2, column=i, value=h), bg="455A64")
     for i, w in enumerate([16,14,12,40,16,16,30], 1):
         ws5.column_dimensions[get_column_letter(i)].width = w
-
     row_n5 = 3
     for _, r in vision_only.sort_values('vision_invoice').iterrows():
         ws5.row_dimensions[row_n5].height = 18
-        for ci, val in enumerate([r['vision_invoice'], r['vision_sales_rep'],
-                                   r['vision_date'], r['vision_description'],
-                                   r['vision_billed'], r['vision_cost'], ""], 1):
+        for ci, val in enumerate([r['vision_invoice'], r['vision_sales_rep'], r['vision_date'],
+                                   r['vision_description'], r['vision_billed'], r['vision_cost'], ""], 1):
             c = ws5.cell(row=row_n5, column=ci, value=val)
             body(c, center=(ci in [1,2,3,5,6]))
             if ci in [5, 6]:
@@ -401,7 +365,6 @@ def build_excel(merged):
     buf.seek(0)
     return buf
 
-# ── Run button ────────────────────────────────────────────────────────────────
 ready = vision_file and nin_file and wwe_file
 
 if st.button("Run Reconciliation", disabled=not ready):
@@ -425,15 +388,15 @@ if st.button("Run Reconciliation", disabled=not ready):
             vision_only   = merged[merged['status'] == 'VISION ONLY']
 
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("⚠ Mismatches",    len(mismatches))
-            col2.metric("✓ Matched",        len(matches))
-            col3.metric("⚡ Not in Vision", len(not_in_vision))
-            col4.metric("Vision Only",      len(vision_only))
+            col1.metric("Mismatches",    len(mismatches))
+            col2.metric("Matched",       len(matches))
+            col3.metric("Not in Vision", len(not_in_vision))
+            col4.metric("Vision Only",   len(vision_only))
 
             excel_buf = build_excel(merged)
             st.success("Reconciliation complete. Download your report below.")
             st.download_button(
-                label="⬇ Download Reconciliation Report (.xlsx)",
+                label="Download Reconciliation Report (.xlsx)",
                 data=excel_buf,
                 file_name="GSB_Shipping_Reconciliation.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
