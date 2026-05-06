@@ -18,6 +18,7 @@ st.markdown("""
     .block-container { max-width: 760px; padding-top: 2rem; }
     h1 { color: #E8601C !important; font-size: 1.6rem !important; }
     h3 { color: #2B2B2B !important; font-size: 1rem !important; font-weight: 600 !important; }
+    p { color: #2B2B2B !important; }
     .stUploadedFile { border-color: #E8601C !important; }
     div[data-testid="stFileUploader"] label { font-weight: 600; color: #2B2B2B; }
     .stButton button { background-color: #E8601C !important; color: white !important;
