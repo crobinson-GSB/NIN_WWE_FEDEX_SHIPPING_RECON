@@ -35,31 +35,43 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Header ────────────────────────────────────────────────────────────────────
-st.markdown("# GSB Digital — Shipping Reconciliation")
-st.markdown("Upload your Vision export and vendor invoices. The tool will match them, flag discrepancies, and return a formatted Excel report.")
+st.image("https://gsbdigital.com/wp-content/uploads/2018/06/GSB_DigitalLogo-2015-300x44.png", width=200)
+st.markdown("# Shipping Reconciliation Tool")
+st.markdown("Automatically match Vision exports against vendor invoices and identify shipping cost discrepancies.")
 st.divider()
 
-# ── File uploaders ────────────────────────────────────────────────────────────
-st.markdown("### Vision Export")
-vision_file = st.file_uploader(
-    "Vision Report (.txt or .xlsx export from Printsmith Vision)",
-    type=["txt", "xlsx"],
-    key="vision"
-)
+with st.expander("How to use this tool", expanded=False):
+    st.markdown("""
+**What this tool does**
+Compares your Printsmith Vision shipping export against vendor invoices from NIN (courier) and WWE/UPS. It cleans and matches invoice numbers automatically, then flags any discrepancies between what was recorded in Vision and what the vendor actually charged.
 
-st.markdown("### Vendor Invoices")
-col1, col2 = st.columns(2)
-with col1:
-    nin_file = st.file_uploader("NIN — Courier (.xls)", type=["xls", "xlsx"], key="nin")
-with col2:
-    wwe_file = st.file_uploader("WWE — UPS (.xls)", type=["xls", "xlsx"], key="wwe")
+**Step 1 — Export from Vision**
+In Printsmith Vision, run your Digital Shipping report for the billing period. Export it as a .txt or .xlsx file.
 
-col3, col4 = st.columns(2)
-with col3:
-    fedex_file = st.file_uploader("FedEx (optional)", type=["xls", "xlsx", "csv"], key="fedex")
-with col4:
-    extra_file = st.file_uploader("Additional vendor (optional)", type=["xls", "xlsx", "csv"], key="extra")
+**Step 2 — Download vendor invoices**
+- **NIN:** Download your courier invoice from the NIN portal as an .xls file
+- **WWE/UPS:** Download your UPS invoice from the WWE portal as an .xls file
+- **FedEx:** Download your FedEx invoice if applicable
 
+**Step 3 — Upload the files**
+Drop each file into the correct upload box below. The Vision export and at least one vendor invoice (NIN or WWE) are required. FedEx and additional vendors are optional.
+
+**Step 4 — Run the reconciliation**
+Click "Run Reconciliation." The tool will process the files and show a summary of results.
+
+**Step 5 — Download the report**
+Click the download button to get your Excel report. It includes five tabs:
+- **Summary** — overall counts and financial impact
+- **Mismatches** — invoices where Vision cost and vendor cost don't match (action required)
+- **Matched** — invoices that reconciled cleanly
+- **Not in Vision** — vendor charges with no matching Vision entry
+- **Vision Only** — Vision entries with no vendor invoice received yet
+
+**Tips**
+- Invoice numbers are matched automatically — no manual cleaning needed
+- Run this each billing cycle when vendor invoices arrive
+- The Mismatches tab is your primary action list
+""")
 st.divider()
 
 # ── Core logic ────────────────────────────────────────────────────────────────
