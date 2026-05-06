@@ -64,6 +64,25 @@ st.markdown("""
         border-radius: 6px !important;
         color: #2B2B2B !important;
     }
+    /* Upload button and surrounding area */
+    div[data-testid="stFileUploader"] section {
+        background-color: #2B2B2B !important;
+        border-color: #444444 !important;
+    }
+    div[data-testid="stFileUploader"] section:hover {
+        border-color: #E8601C !important;
+    }
+    div[data-testid="stFileUploader"] section button {
+        background-color: #E8601C !important;
+        color: white !important;
+        border: none !important;
+    }
+    div[data-testid="stFileUploader"] section button:hover {
+        background-color: #c94f14 !important;
+    }
+    div[data-testid="stFileUploader"] section span {
+        color: #AAAAAA !important;
+    }
     footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
