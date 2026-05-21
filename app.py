@@ -155,7 +155,7 @@ with col2:
 
 col3, col4 = st.columns(2)
 with col3:
-    fedex_file = st.file_uploader("FedEx (optional)", type=["xls", "xlsx", "csv"], key="fedex")
+    fedex_file = st.file_uploader("FedEx (.csv, .xls, or .xlsx)", type=["xls", "xlsx", "csv"], key="fedex")
 with col4:
     extra_file = st.file_uploader("Additional vendor (optional)", type=["xls", "xlsx", "csv"], key="extra")
 
@@ -183,6 +183,7 @@ def read_excel_any(file):
 REQUIRED_VISION  = {'Invoice', 'Cost', 'Amount', 'Sales Rep', 'Description', 'Pickup Date'}
 REQUIRED_NIN     = {'Auth', 'AmountCharged', 'InvoiceNumber', 'OrderNumber'}
 REQUIRED_WWE     = {'Billing Reference 1', 'Charge Total', 'Invoice #', 'Airbill #'}
+REQUIRED_FEDEX   = {'Reference Notes Line 1', 'Net Charge Amount USD', 'Shipment Tracking Number', 'Invoice Number'}
 
 def validate_columns(df, required, label):
     missing = required - set(df.columns)
@@ -218,16 +219,35 @@ def load_vision(file):
         vision_date=('Pickup Date', 'first')
     ).reset_index()
 
+def assign_unmatched_keys(df, key_col, label):
+    """
+    For rows where key is blank or non-standard (not a 6-7 digit GSB invoice number),
+    assign a unique placeholder key so they are NEVER dropped from the reconciliation.
+    Each unmatched row gets its own key: e.g. NIN_UNMATCHED_001, WWE_UNMATCHED_002
+    This guarantees every dollar from every vendor file appears in the output.
+    """
+    gsb_pattern = re.compile(r'^\d{6,7}$')
+    counter = [0]
+    def safe_key(k):
+        if k == '' or not gsb_pattern.match(k):
+            counter[0] += 1
+            return f'{label}_UNMATCHED_{counter[0]:03d}'
+        return k
+    df[key_col] = df[key_col].apply(safe_key)
+    return df
+
 def load_nin(file):
     df = read_excel_any(file)
     if not validate_columns(df, REQUIRED_NIN, 'NIN — Courier'):
         return None
     df['AmountCharged'] = pd.to_numeric(df['AmountCharged'], errors='coerce').fillna(0)
     df['key'] = df['Auth'].apply(clean_key)
+    df = assign_unmatched_keys(df, 'key', 'NIN')
     return df.groupby('key').agg(
         nin_invoice_num=('InvoiceNumber', 'first'),
         nin_actual_cost=('AmountCharged', 'sum'),
-        nin_shipments=('OrderNumber', 'count')
+        nin_shipments=('OrderNumber', 'count'),
+        nin_raw_ref=('Auth', 'first')
     ).reset_index()
 
 def load_wwe(file):
@@ -236,23 +256,55 @@ def load_wwe(file):
         return None
     df['Charge Total'] = pd.to_numeric(df['Charge Total'], errors='coerce').fillna(0)
     df['key'] = df['Billing Reference 1'].apply(clean_key)
+    # Strip underscore/space suffix junk (e.g. 'D1055646Box Inserts' -> '1055646')
+    df['key'] = df['key'].apply(lambda s: re.match(r'^(\d{6,7})', s).group(1)
+                                if re.match(r'^(\d{6,7})', s) else s)
+    df = assign_unmatched_keys(df, 'key', 'WWE')
     return df.groupby('key').agg(
         wwe_invoice_num=('Invoice #', 'first'),
         wwe_actual_cost=('Charge Total', 'sum'),
-        wwe_shipments=('Airbill #', 'count')
+        wwe_shipments=('Airbill #', 'count'),
+        wwe_raw_ref=('Billing Reference 1', 'first')
+    ).reset_index()
+
+def load_fedex(file):
+    if file.name.lower().endswith('.csv'):
+        try:
+            df = pd.read_csv(file, encoding='cp1252')
+        except UnicodeDecodeError:
+            file.seek(0)
+            df = pd.read_csv(file)
+    else:
+        df = read_excel_any(file)
+    if not validate_columns(df, REQUIRED_FEDEX, 'FedEx'):
+        return None
+    df['Net Charge Amount USD'] = pd.to_numeric(df['Net Charge Amount USD'], errors='coerce').fillna(0)
+    # Strip underscore suffix (e.g. 'D1055269_ 1 of Each Vers' -> '1055269')
+    df['key'] = df['Reference Notes Line 1'].apply(
+        lambda v: clean_key(v).split('_')[0]
+    )
+    df = assign_unmatched_keys(df, 'key', 'FEDEX')
+    return df.groupby('key').agg(
+        fedex_invoice_num=('Invoice Number', 'first'),
+        fedex_actual_cost=('Net Charge Amount USD', 'sum'),
+        fedex_shipments=('Shipment Tracking Number', 'count'),
+        fedex_raw_ref=('Reference Notes Line 1', 'first')
     ).reset_index()
 
 def assign_status(row):
-    has_wwe = pd.notna(row.get('wwe_actual_cost'))
-    has_nin = pd.notna(row.get('nin_actual_cost'))
-    has_vis = pd.notna(row.get('vision_cost')) and row.get('vision_cost', 0) != 0
-    if not has_vis and (has_wwe or has_nin):
+    has_wwe   = pd.notna(row.get('wwe_actual_cost'))
+    has_nin   = pd.notna(row.get('nin_actual_cost'))
+    has_fedex = pd.notna(row.get('fedex_actual_cost'))
+    has_vis   = pd.notna(row.get('vision_cost')) and row.get('vision_cost', 0) != 0
+    if not has_vis and (has_wwe or has_nin or has_fedex):
         return "NOT IN VISION"
-    if has_wwe and pd.notna(row.get('wwe_diff')) and abs(row['wwe_diff']) > 0.01:
+    if has_wwe   and pd.notna(row.get('wwe_diff'))   and abs(row['wwe_diff'])   > 0.01:
         return "MISMATCH"
-    if has_nin and pd.notna(row.get('nin_diff')) and abs(row['nin_diff']) > 0.01:
+    if has_nin   and pd.notna(row.get('nin_diff'))   and abs(row['nin_diff'])   > 0.01:
         return "MISMATCH"
-    if (has_wwe or has_nin) and has_vis:
+    if has_fedex and pd.notna(row.get('fedex_diff')) and abs(row['fedex_diff']) > 0.01:
+        return "MISMATCH"
+    if (has_wwe or has_nin or has_fedex) and has_vis:
         return "MATCH"
     return "VISION ONLY"
 
@@ -302,7 +354,7 @@ def value_cell(ws, row, col, val, bold=False, color=DARK, fill=None):
         c.fill = PatternFill("solid", fgColor=fill)
     return c
 
-def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
+def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label):
     mismatches    = merged[merged['status'] == 'MISMATCH'].copy()
     matches       = merged[merged['status'] == 'MATCH'].copy()
     vision_only   = merged[merged['status'] == 'VISION ONLY'].copy()
@@ -380,6 +432,8 @@ def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
         vendor_cols.append(('NIN (Courier)', 'nin_actual_cost', 'nin_diff'))
     if has_wwe:
         vendor_cols.append(('WWE / UPS', 'wwe_actual_cost', 'wwe_diff'))
+    if has_fedex:
+        vendor_cols.append(('FedEx', 'fedex_actual_cost', 'fedex_diff'))
 
     col_labels = [""] + [v[0] for v in vendor_cols]
     if has_nin and has_wwe:
@@ -407,7 +461,7 @@ def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
             is_diff = (metric == 'diff')
             color = ("CC0000" if val < 0 else ("006600" if val > 0 else DARK)) if is_diff else DARK
             value_cell(ws, r_offset, col_i, val, bold=is_diff, color=color)
-        if has_nin and has_wwe:
+        if len(vendor_cols) > 1:
             is_diff = (metric == 'diff')
             color = ("CC0000" if total < 0 else ("006600" if total > 0 else DARK)) if is_diff else DARK
             value_cell(ws, r_offset, len(vendor_cols) + 2, total, bold=is_diff, color=color)
@@ -417,6 +471,9 @@ def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
     section_row = 9 + len(spend_rows) + 1
     section_header(ws, section_row, "MISMATCH IMPACT — Invoices Where Vision and Vendor Costs Differ", bg="B85C00")
 
+    col_labels = [""] + [v[0] for v in vendor_cols]
+    if len(vendor_cols) > 1:
+        col_labels.append("Combined Total")
     col_header_row(ws, section_row + 1, col_labels, bg="B85C00")
 
     mismatch_metric_rows = [
@@ -441,7 +498,7 @@ def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
             color = ("CC0000" if val < 0 else ("006600" if val > 0 else DARK)) if is_diff else DARK
             fill = "FFF0E8" if is_diff else None
             value_cell(ws, r_offset, col_i, val, bold=is_diff, color=color, fill=fill)
-        if has_nin and has_wwe:
+        if len(vendor_cols) > 1:
             is_diff = (metric == 'diff')
             color = ("CC0000" if total < 0 else ("006600" if total > 0 else DARK)) if is_diff else DARK
             fill = "FFF0E8" if is_diff else None
@@ -472,6 +529,8 @@ def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
             vendor_pairs.append(("WWE (UPS)", r.get('wwe_actual_cost'), r.get('wwe_diff'), r.get('wwe_invoice_num',''), r.get('wwe_shipments')))
         if has_nin:
             vendor_pairs.append(("NIN (Courier)", r.get('nin_actual_cost'), r.get('nin_diff'), r.get('nin_invoice_num',''), r.get('nin_shipments')))
+        if has_fedex:
+            vendor_pairs.append(("FedEx", r.get('fedex_actual_cost'), r.get('fedex_diff'), r.get('fedex_invoice_num',''), r.get('fedex_shipments')))
         for vendor, cost, diff, inv, ships in vendor_pairs:
             if pd.notna(cost):
                 fill = RED_FILL if diff < -0.01 else (YELLOW_FILL if diff > 0.01 else GREEN_FILL)
@@ -518,6 +577,8 @@ def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
             vendor_pairs.append(("WWE (UPS)", r.get('wwe_actual_cost'), r.get('wwe_diff')))
         if has_nin:
             vendor_pairs.append(("NIN (Courier)", r.get('nin_actual_cost'), r.get('nin_diff')))
+        if has_fedex:
+            vendor_pairs.append(("FedEx", r.get('fedex_actual_cost'), r.get('fedex_diff')))
         for vendor, cost, diff in vendor_pairs:
             if pd.notna(cost):
                 ws3.row_dimensions[row_n3].height = 18
@@ -532,35 +593,84 @@ def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
     # ══ Not in Vision tab ══
     ws4 = wb.create_sheet("Not in Vision")
     ws4.sheet_view.showGridLines = False
+
+    # Split into two groups:
+    # - Rows with a real GSB invoice key (no Vision match found)
+    # - Rows flagged as UNMATCHED (missing or unreadable reference — needs manual review)
+    unmatched_pattern = re.compile(r'^(NIN|WWE|FEDEX)_UNMATCHED_\d+$')
+
+    def write_niv_section(ws, start_row, section_title, section_color, rows_df, has_nin, has_wwe, has_fedex):
+        # Section header
+        ws.merge_cells(f'A{start_row}:H{start_row}')
+        c = ws.cell(row=start_row, column=1, value=section_title)
+        c.font = Font(name="Arial", bold=True, size=12, color=WHITE)
+        c.fill = PatternFill("solid", fgColor=section_color)
+        c.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[start_row].height = 28
+
+        # Column headers
+        col_headers = ["GSB Invoice # / Key", "Original Vendor Reference",
+                       "Vendor", "Vendor Invoice #", "# Shipments",
+                       "Vendor Cost", "Notes", "Resolved?"]
+        for i, h in enumerate(col_headers, 1):
+            hdr(ws.cell(row=start_row+1, column=i, value=h), bg=section_color)
+        ws.row_dimensions[start_row+1].height = 18
+
+        row_n = start_row + 2
+        for _, r in rows_df.sort_values('key').iterrows():
+            vendor_pairs = []
+            if has_wwe:
+                vendor_pairs.append(("WWE (UPS)",    r.get('wwe_actual_cost'),   r.get('wwe_shipments'),   r.get('wwe_invoice_num',''),   r.get('wwe_raw_ref','')))
+            if has_nin:
+                vendor_pairs.append(("NIN (Courier)",r.get('nin_actual_cost'),   r.get('nin_shipments'),   r.get('nin_invoice_num',''),   r.get('nin_raw_ref','')))
+            if has_fedex:
+                vendor_pairs.append(("FedEx",        r.get('fedex_actual_cost'), r.get('fedex_shipments'), r.get('fedex_invoice_num',''), r.get('fedex_raw_ref','')))
+            for vendor, cost, ships, inv, raw_ref in vendor_pairs:
+                if pd.notna(cost):
+                    ws.row_dimensions[row_n].height = 18
+                    display_key = raw_ref if (pd.isna(r['key']) or unmatched_pattern.match(str(r['key']))) else r['key']
+                    display_raw = raw_ref if raw_ref else '— no reference —'
+                    note = "⚠ No usable reference — manual review required" if unmatched_pattern.match(str(r['key'])) else "Invoice not matched in Vision"
+                    row_data = [display_key, display_raw, vendor, inv,
+                                int(ships) if pd.notna(ships) else '',
+                                cost, note, ""]
+                    for ci, val in enumerate(row_data, 1):
+                        c = ws.cell(row=row_n, column=ci, value=val)
+                        fill = "FFE0E0" if unmatched_pattern.match(str(r['key'])) else YELLOW_FILL
+                        body(c, center=(ci in [3,4,5,6,8]),
+                             fill=fill if ci in [1,2,6,7] else None)
+                        if ci == 6:
+                            c.number_format = '$#,##0.00'
+                    row_n += 1
+        return row_n  # return next available row
+
+    for i, w in enumerate([22, 28, 14, 18, 12, 14, 40, 12], 1):
+        ws4.column_dimensions[get_column_letter(i)].width = w
+
+    # Title banner
     ws4.merge_cells('A1:H1')
     ws4['A1'] = "Vendor Charges Not Found in Vision — Review Required"
     ws4['A1'].font = Font(name="Arial", bold=True, size=13, color=WHITE)
     ws4['A1'].fill = PatternFill("solid", fgColor="B8860B")
     ws4['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws4.row_dimensions[1].height = 35
-    for i, h in enumerate(["Reference Key","Vendor","Vendor Invoice #","# Shipments",
-                            "Vendor Cost","Notes","Resolved?"], 1):
-        hdr(ws4.cell(row=2, column=i, value=h), bg="B8860B")
-    for i, w in enumerate([18,14,18,12,14,35,12], 1):
-        ws4.column_dimensions[get_column_letter(i)].width = w
-    row_n4 = 3
-    for _, r in not_in_vision.sort_values('key').iterrows():
-        vendor_pairs = []
-        if has_wwe:
-            vendor_pairs.append(("WWE (UPS)", r.get('wwe_actual_cost'), r.get('wwe_shipments'), r.get('wwe_invoice_num','')))
-        if has_nin:
-            vendor_pairs.append(("NIN (Courier)", r.get('nin_actual_cost'), r.get('nin_shipments'), r.get('nin_invoice_num','')))
-        for vendor, cost, ships, inv in vendor_pairs:
-            if pd.notna(cost):
-                ws4.row_dimensions[row_n4].height = 18
-                for ci, val in enumerate([r['key'], vendor, inv,
-                                          int(ships) if pd.notna(ships) else '',
-                                          cost, "Invoice not matched in Vision", ""], 1):
-                    c = ws4.cell(row=row_n4, column=ci, value=val)
-                    body(c, center=(ci in [2,3,4,5,7]), fill=YELLOW_FILL if ci in [1,2,5] else None)
-                    if ci == 5:
-                        c.number_format = '$#,##0.00'
-                row_n4 += 1
+
+    # Section 1 — rows with a real reference that just didn't match Vision
+    matched_ref_rows = not_in_vision[~not_in_vision['key'].apply(
+        lambda k: bool(unmatched_pattern.match(str(k))))]
+    # Section 2 — rows with no usable reference at all
+    unmatched_ref_rows = not_in_vision[not_in_vision['key'].apply(
+        lambda k: bool(unmatched_pattern.match(str(k))))]
+
+    next_row = write_niv_section(ws4, 3,
+        "SECTION 1 — Charges with a Reference Number (not matched to Vision)",
+        "B8860B", matched_ref_rows, has_nin, has_wwe, has_fedex)
+
+    if not unmatched_ref_rows.empty:
+        next_row += 1  # blank spacer row
+        write_niv_section(ws4, next_row,
+            "SECTION 2 — Charges with NO Reference — Manual Review Required",
+            "CC0000", unmatched_ref_rows, has_nin, has_wwe, has_fedex)
 
     # ══ Vision Only tab ══
     ws5 = wb.create_sheet("Vision Only")
@@ -593,13 +703,14 @@ def build_excel(merged, has_nin, has_wwe, vendors_label, period_label):
     return buf
 
 # ── Ready check ──
-ready = vision_file and (nin_file or wwe_file)
+ready = vision_file and (nin_file or wwe_file or fedex_file)
 
 if st.button("Run Reconciliation", disabled=not ready):
     with st.spinner("Matching invoices and calculating discrepancies..."):
         try:
-            has_nin = nin_file is not None
-            has_wwe = wwe_file is not None
+            has_nin   = nin_file is not None
+            has_wwe   = wwe_file is not None
+            has_fedex = fedex_file is not None
 
             vision_agg = load_vision(vision_file)
             if vision_agg is None:
@@ -619,12 +730,26 @@ if st.button("Run Reconciliation", disabled=not ready):
                     st.stop()
                 merged = merged.merge(nin_agg, on='key', how='outer')
 
-            merged = merged[merged['key'] != ''].copy()
+            if has_fedex:
+                fedex_agg = load_fedex(fedex_file)
+                if fedex_agg is None:
+                    st.stop()
+                merged = merged.merge(fedex_agg, on='key', how='outer')
+
+            # Never drop rows — every vendor charge must appear in the output.
+            # The only rows we can safely remove are ones with no key AND no costs at all,
+            # which are phantom rows created by the outer merge with nothing in them.
+            cost_cols = [c for c in ['vision_cost','wwe_actual_cost','nin_actual_cost','fedex_actual_cost']
+                         if c in merged.columns]
+            has_any_value = merged[cost_cols].notna().any(axis=1)
+            merged = merged[has_any_value].copy()
 
             if has_wwe:
-                merged['wwe_diff'] = (merged['wwe_actual_cost'] - merged['vision_cost']).round(2)
+                merged['wwe_diff']   = (merged['wwe_actual_cost']   - merged['vision_cost']).round(2)
             if has_nin:
-                merged['nin_diff'] = (merged['nin_actual_cost'] - merged['vision_cost']).round(2)
+                merged['nin_diff']   = (merged['nin_actual_cost']   - merged['vision_cost']).round(2)
+            if has_fedex:
+                merged['fedex_diff'] = (merged['fedex_actual_cost'] - merged['vision_cost']).round(2)
 
             merged['status'] = merged.apply(assign_status, axis=1)
 
@@ -641,8 +766,9 @@ if st.button("Run Reconciliation", disabled=not ready):
 
             # Build labels for filename and Excel
             vendor_parts = []
-            if has_nin: vendor_parts.append("NIN")
-            if has_wwe: vendor_parts.append("WWE")
+            if has_nin:   vendor_parts.append("NIN")
+            if has_wwe:   vendor_parts.append("WWE")
+            if has_fedex: vendor_parts.append("FedEx")
             vendors_label = " + ".join(vendor_parts)
 
             if period_start and period_end:
@@ -654,7 +780,7 @@ if st.button("Run Reconciliation", disabled=not ready):
 
             filename = f"GSB_Shipping_Recon_{period_slug}.xlsx"
 
-            excel_buf = build_excel(merged, has_nin, has_wwe, vendors_label, period_label)
+            excel_buf = build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label)
             st.success("Reconciliation complete. Download your report below.")
             st.download_button(
                 label="Download Reconciliation Report (.xlsx)",
@@ -670,6 +796,6 @@ if st.button("Run Reconciliation", disabled=not ready):
 
 elif not ready:
     if not vision_file:
-        st.info("Upload the Vision export to get started. Then add at least one vendor invoice (NIN or WWE).")
+        st.info("Upload the Vision export to get started. Then add at least one vendor invoice (NIN, WWE, or FedEx).")
     else:
-        st.info("Vision file uploaded. Now add at least one vendor invoice (NIN or WWE) to run the reconciliation.")
+        st.info("Vision file uploaded. Now add at least one vendor invoice (NIN, WWE, or FedEx) to run the reconciliation.")
