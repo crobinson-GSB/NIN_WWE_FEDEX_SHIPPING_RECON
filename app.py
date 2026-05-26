@@ -122,9 +122,12 @@ Click the download button to get your Excel report. It includes five tabs:
 - **Matched** — invoices that reconciled cleanly
 - **Not in Vision** — vendor charges with no matching Vision entry
 - **Vision Only** — Vision entries with no vendor invoice received yet
+- **Possible Duplicates** — rows appearing in more than one uploaded file for the same vendor, flagged for your team to review
 
 **Tips**
 - Invoice numbers are matched automatically — no manual cleaning needed
+- You can upload multiple files per vendor — useful when a billing period spans more than one invoice
+- If files overlap in date range, duplicate shipments are flagged in the Possible Duplicates tab — nothing is deleted
 - Run this each billing cycle when vendor invoices arrive
 - The Mismatches tab is your primary action list
 """)
@@ -149,13 +152,13 @@ vision_file = st.file_uploader(
 st.markdown("### Vendor Invoices")
 col1, col2 = st.columns(2)
 with col1:
-    nin_file = st.file_uploader("NIN — Courier (.xls or .xlsx)", type=["xls", "xlsx"], key="nin")
+    nin_files = st.file_uploader("NIN — Courier (.xls or .xlsx)", type=["xls", "xlsx"], key="nin", accept_multiple_files=True)
 with col2:
-    wwe_file = st.file_uploader("WWE — UPS (.xls or .xlsx)", type=["xls", "xlsx"], key="wwe")
+    wwe_files = st.file_uploader("WWE — UPS (.xls or .xlsx)", type=["xls", "xlsx"], key="wwe", accept_multiple_files=True)
 
 col3, col4 = st.columns(2)
 with col3:
-    fedex_file = st.file_uploader("FedEx (.csv, .xls, or .xlsx)", type=["xls", "xlsx", "csv"], key="fedex")
+    fedex_files = st.file_uploader("FedEx (.csv, .xls, or .xlsx)", type=["xls", "xlsx", "csv"], key="fedex", accept_multiple_files=True)
 with col4:
     extra_file = st.file_uploader("Additional vendor (optional)", type=["xls", "xlsx", "csv"], key="extra")
 
@@ -243,12 +246,9 @@ def load_nin(file):
     df['AmountCharged'] = pd.to_numeric(df['AmountCharged'], errors='coerce').fillna(0)
     df['key'] = df['Auth'].apply(clean_key)
     df = assign_unmatched_keys(df, 'key', 'NIN')
-    return df.groupby('key').agg(
-        nin_invoice_num=('InvoiceNumber', 'first'),
-        nin_actual_cost=('AmountCharged', 'sum'),
-        nin_shipments=('OrderNumber', 'count'),
-        nin_raw_ref=('Auth', 'first')
-    ).reset_index()
+    df['_tracking'] = df['OrderNumber'].astype(str).str.strip()
+    df['_source_file'] = file.name
+    return df
 
 def load_wwe(file):
     df = read_excel_any(file)
@@ -256,16 +256,12 @@ def load_wwe(file):
         return None
     df['Charge Total'] = pd.to_numeric(df['Charge Total'], errors='coerce').fillna(0)
     df['key'] = df['Billing Reference 1'].apply(clean_key)
-    # Strip underscore/space suffix junk (e.g. 'D1055646Box Inserts' -> '1055646')
     df['key'] = df['key'].apply(lambda s: re.match(r'^(\d{6,7})', s).group(1)
                                 if re.match(r'^(\d{6,7})', s) else s)
     df = assign_unmatched_keys(df, 'key', 'WWE')
-    return df.groupby('key').agg(
-        wwe_invoice_num=('Invoice #', 'first'),
-        wwe_actual_cost=('Charge Total', 'sum'),
-        wwe_shipments=('Airbill #', 'count'),
-        wwe_raw_ref=('Billing Reference 1', 'first')
-    ).reset_index()
+    df['_tracking'] = df['Airbill #'].astype(str).str.strip()
+    df['_source_file'] = file.name
+    return df
 
 def load_fedex(file):
     if file.name.lower().endswith('.csv'):
@@ -279,16 +275,83 @@ def load_fedex(file):
     if not validate_columns(df, REQUIRED_FEDEX, 'FedEx'):
         return None
     df['Net Charge Amount USD'] = pd.to_numeric(df['Net Charge Amount USD'], errors='coerce').fillna(0)
-    # Strip underscore suffix (e.g. 'D1055269_ 1 of Each Vers' -> '1055269')
-    df['key'] = df['Reference Notes Line 1'].apply(
-        lambda v: clean_key(v).split('_')[0]
-    )
+    df['key'] = df['Reference Notes Line 1'].apply(lambda v: clean_key(v).split('_')[0])
     df = assign_unmatched_keys(df, 'key', 'FEDEX')
+    df['_tracking'] = df['Shipment Tracking Number'].astype(str).str.strip()
+    df['_source_file'] = file.name
+    return df
+
+def combine_vendor_files(file_list, load_fn):
+    """Load multiple files for the same vendor and combine into one dataframe.
+    Keeps all rows — duplicates are flagged, never deleted."""
+    frames = []
+    for f in file_list:
+        df = load_fn(f)
+        if df is not None:
+            frames.append(df)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+def flag_duplicates(df, tracking_col, cost_col, date_col, ref_col, label):
+    """
+    Flag rows where the same tracking number appears more than once.
+    Returns the full dataframe (nothing removed) plus a separate
+    duplicates dataframe for the Possible Duplicates tab.
+    """
+    df = df.copy()
+    df['_possible_duplicate'] = ''
+    df['_dup_files'] = ''
+
+    valid = df[tracking_col].notna() & (df[tracking_col].astype(str).str.strip() != '') & \
+            (df[tracking_col].astype(str).str.strip() != 'nan')
+    counts = df[valid][tracking_col].value_counts()
+    dup_tracking = set(counts[counts > 1].index)
+
+    for idx, row in df[valid].iterrows():
+        t = row[tracking_col]
+        if t in dup_tracking:
+            files = df[df[tracking_col] == t]['_source_file'].tolist()
+            df.at[idx, '_possible_duplicate'] = 'POSSIBLE DUPLICATE'
+            df.at[idx, '_dup_files'] = ', '.join(files)
+
+    # Build duplicates summary dataframe for the Excel tab
+    dup_rows = df[df['_possible_duplicate'] == 'POSSIBLE DUPLICATE'].copy()
+    if not dup_rows.empty:
+        dup_summary = dup_rows[[tracking_col, ref_col, cost_col, date_col, '_source_file', '_dup_files']].copy()
+        dup_summary.columns = ['tracking', 'raw_ref', 'cost', 'date', 'source_file', 'appears_in']
+        dup_summary['vendor'] = label
+    else:
+        dup_summary = pd.DataFrame(columns=['tracking','raw_ref','cost','date','source_file','appears_in','vendor'])
+
+    # Aggregate after flagging — group by key, keep duplicate flag if any row in group is flagged
+    return df, dup_summary
+
+def agg_nin(df):
+    return df.groupby('key').agg(
+        nin_invoice_num=('InvoiceNumber', 'first'),
+        nin_actual_cost=('AmountCharged', 'sum'),
+        nin_shipments=('OrderNumber', 'count'),
+        nin_raw_ref=('Auth', 'first'),
+        nin_date=('Orderdate', 'first')
+    ).reset_index()
+
+def agg_wwe(df):
+    return df.groupby('key').agg(
+        wwe_invoice_num=('Invoice #', 'first'),
+        wwe_actual_cost=('Charge Total', 'sum'),
+        wwe_shipments=('Airbill #', 'count'),
+        wwe_raw_ref=('Billing Reference 1', 'first'),
+        wwe_date=('Ship date', 'first')
+    ).reset_index()
+
+def agg_fedex(df):
     return df.groupby('key').agg(
         fedex_invoice_num=('Invoice Number', 'first'),
         fedex_actual_cost=('Net Charge Amount USD', 'sum'),
         fedex_shipments=('Shipment Tracking Number', 'count'),
-        fedex_raw_ref=('Reference Notes Line 1', 'first')
+        fedex_raw_ref=('Reference Notes Line 1', 'first'),
+        fedex_date=('Shipment Date (mm/dd/yyyy)', 'first')
     ).reset_index()
 
 def assign_status(row):
@@ -354,7 +417,7 @@ def value_cell(ws, row, col, val, bold=False, color=DARK, fill=None):
         c.fill = PatternFill("solid", fgColor=fill)
     return c
 
-def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label):
+def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label, dup_df):
     mismatches    = merged[merged['status'] == 'MISMATCH'].copy()
     matches       = merged[merged['status'] == 'MATCH'].copy()
     vision_only   = merged[merged['status'] == 'VISION ONLY'].copy()
@@ -697,48 +760,181 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label
                 c.number_format = '$#,##0.00'
         row_n5 += 1
 
+    # ══ Possible Duplicates tab ══
+    ws6 = wb.create_sheet("Possible Duplicates")
+    ws6.sheet_view.showGridLines = False
+
+    # Title banner
+    ws6.merge_cells('A1:H1')
+    ws6['A1'] = "Possible Duplicates — Review Required"
+    ws6['A1'].font = Font(name="Arial", bold=True, size=13, color=WHITE)
+    ws6['A1'].fill = PatternFill("solid", fgColor=ORANGE)
+    ws6['A1'].alignment = Alignment(horizontal="center", vertical="center")
+    ws6.row_dimensions[1].height = 35
+
+    # Info row
+    ws6.merge_cells('A2:H2')
+    ws6['A2'] = "These rows appear in more than one uploaded file for the same vendor. Nothing has been deleted. All rows still appear in every other tab. Your team must review and mark resolved."
+    ws6['A2'].font = Font(name="Arial", italic=True, size=9, color="555555")
+    ws6['A2'].fill = PatternFill("solid", fgColor="F2F2F2")
+    ws6['A2'].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    ws6['A2'].border = tb()
+    ws6.row_dimensions[2].height = 28
+
+    for i, w in enumerate([18, 22, 14, 12, 16, 14, 40, 14], 1):
+        ws6.column_dimensions[get_column_letter(i)].width = w
+
+    if dup_df.empty:
+        ws6.merge_cells('A4:H4')
+        c = ws6.cell(row=4, column=1, value="No duplicate tracking numbers detected across uploaded files.")
+        c.font = Font(name="Arial", italic=True, size=10, color="555555")
+        c.fill = PatternFill("solid", fgColor=GREEN_FILL)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws6.row_dimensions[4].height = 28
+    else:
+        # Grand total row
+        total_flagged = len(dup_df)
+        total_at_risk = dup_df['cost'].sum()
+        vendors_affected = dup_df['vendor'].nunique()
+        ws6.row_dimensions[4].height = 35
+        for ci, (label_t, val_t) in enumerate([
+            ("TOTAL FLAGGED ROWS", total_flagged),
+            ("TOTAL $ FLAGGED FOR REVIEW", f"${total_at_risk:,.2f}"),
+            ("VENDORS AFFECTED", vendors_affected)
+        ], 1):
+            c_top = ws6.cell(row=4, column=ci, value=str(val_t))
+            c_top.font = Font(name="Arial", bold=True, size=16)
+            c_top.fill = PatternFill("solid", fgColor="FFF2CC")
+            c_top.alignment = Alignment(horizontal="center", vertical="center")
+            c_top.border = tb()
+            c_bot = ws6.cell(row=5, column=ci, value=label_t)
+            c_bot.font = Font(name="Arial", bold=True, size=9, color="555555")
+            c_bot.fill = PatternFill("solid", fgColor="FFF2CC")
+            c_bot.alignment = Alignment(horizontal="center", vertical="center")
+            c_bot.border = tb()
+        ws6.row_dimensions[5].height = 18
+
+        current_row = 7
+        for vendor_label in dup_df['vendor'].unique():
+            vendor_dups = dup_df[dup_df['vendor'] == vendor_label].copy()
+            vendor_total = vendor_dups['cost'].sum()
+
+            # Section header
+            ws6.merge_cells(f'A{current_row}:H{current_row}')
+            c = ws6.cell(row=current_row, column=1,
+                         value=f"{vendor_label}  —  {len(vendor_dups)} flagged rows  —  ${vendor_total:,.2f} flagged for review")
+            c.font = Font(name="Arial", bold=True, size=11, color=WHITE)
+            c.fill = PatternFill("solid", fgColor=DARK)
+            c.alignment = Alignment(horizontal="left", vertical="center")
+            ws6.row_dimensions[current_row].height = 22
+            current_row += 1
+
+            # Column headers
+            for ci, h in enumerate(["GSB Invoice # / Key", "Tracking #", "Date",
+                                     "Amount", "Source File", "Also Appears In",
+                                     "Flag", "Resolved?"], 1):
+                hdr(ws6.cell(row=current_row, column=ci, value=h), bg="555555")
+            ws6.row_dimensions[current_row].height = 18
+            current_row += 1
+
+            for _, dr in vendor_dups.sort_values('tracking').iterrows():
+                ws6.row_dimensions[current_row].height = 18
+                row_vals = [
+                    dr.get('raw_ref', ''),
+                    dr.get('tracking', ''),
+                    dr.get('date', ''),
+                    dr.get('cost', 0),
+                    dr.get('source_file', ''),
+                    dr.get('appears_in', ''),
+                    '⚠ Possible duplicate',
+                    ''
+                ]
+                for ci, val in enumerate(row_vals, 1):
+                    c = ws6.cell(row=current_row, column=ci, value=val)
+                    body(c, center=(ci in [2, 3, 4, 7, 8]), fill=YELLOW_FILL if ci in [4, 7] else None)
+                    if ci == 4:
+                        c.number_format = '$#,##0.00'
+                current_row += 1
+
+            # Vendor totals row
+            ws6.row_dimensions[current_row].height = 20
+            c_lbl = ws6.cell(row=current_row, column=3, value="TOTALS")
+            c_lbl.font = Font(name="Arial", bold=True, size=10)
+            c_lbl.alignment = Alignment(horizontal="right")
+            c_lbl.fill = PatternFill("solid", fgColor=MID_GRAY)
+            c_lbl.border = tb()
+            c_tot = ws6.cell(row=current_row, column=4, value=round(vendor_total, 2))
+            c_tot.font = Font(name="Arial", bold=True, size=10)
+            c_tot.number_format = '$#,##0.00'
+            c_tot.alignment = Alignment(horizontal="center")
+            c_tot.fill = PatternFill("solid", fgColor=MID_GRAY)
+            c_tot.border = tb()
+            lbl2 = ws6.cell(row=current_row, column=5,
+                            value=f"{len(vendor_dups)} rows flagged across uploaded files")
+            lbl2.font = Font(name="Arial", size=9, color="555555")
+            lbl2.fill = PatternFill("solid", fgColor=MID_GRAY)
+            lbl2.border = tb()
+            current_row += 2  # blank spacer between vendors
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf
 
 # ── Ready check ──
-ready = vision_file and (nin_file or wwe_file or fedex_file)
+ready = vision_file and (nin_files or wwe_files or fedex_files)
 
 if st.button("Run Reconciliation", disabled=not ready):
     with st.spinner("Matching invoices and calculating discrepancies..."):
         try:
-            has_nin   = nin_file is not None
-            has_wwe   = wwe_file is not None
-            has_fedex = fedex_file is not None
+            has_nin   = len(nin_files) > 0
+            has_wwe   = len(wwe_files) > 0
+            has_fedex = len(fedex_files) > 0
 
             vision_agg = load_vision(vision_file)
             if vision_agg is None:
                 st.stop()
 
             merged = vision_agg.copy()
+            all_dup_frames = []
 
             if has_wwe:
-                wwe_agg = load_wwe(wwe_file)
-                if wwe_agg is None:
+                wwe_combined = combine_vendor_files(wwe_files, load_wwe)
+                if wwe_combined is None:
                     st.stop()
+                wwe_combined, wwe_dups = flag_duplicates(
+                    wwe_combined, '_tracking', 'Charge Total', 'Ship date',
+                    'Billing Reference 1', 'WWE / UPS')
+                if not wwe_dups.empty:
+                    all_dup_frames.append(wwe_dups)
+                wwe_agg = agg_wwe(wwe_combined)
                 merged = merged.merge(wwe_agg, on='key', how='outer')
 
             if has_nin:
-                nin_agg = load_nin(nin_file)
-                if nin_agg is None:
+                nin_combined = combine_vendor_files(nin_files, load_nin)
+                if nin_combined is None:
                     st.stop()
+                nin_combined, nin_dups = flag_duplicates(
+                    nin_combined, '_tracking', 'AmountCharged', 'Orderdate',
+                    'Auth', 'NIN (Courier)')
+                if not nin_dups.empty:
+                    all_dup_frames.append(nin_dups)
+                nin_agg = agg_nin(nin_combined)
                 merged = merged.merge(nin_agg, on='key', how='outer')
 
             if has_fedex:
-                fedex_agg = load_fedex(fedex_file)
-                if fedex_agg is None:
+                fedex_combined = combine_vendor_files(fedex_files, load_fedex)
+                if fedex_combined is None:
                     st.stop()
+                fedex_combined, fedex_dups = flag_duplicates(
+                    fedex_combined, '_tracking', 'Net Charge Amount USD',
+                    'Shipment Date (mm/dd/yyyy)', 'Reference Notes Line 1', 'FedEx')
+                if not fedex_dups.empty:
+                    all_dup_frames.append(fedex_dups)
+                fedex_agg = agg_fedex(fedex_combined)
                 merged = merged.merge(fedex_agg, on='key', how='outer')
 
-            # Never drop rows — every vendor charge must appear in the output.
-            # The only rows we can safely remove are ones with no key AND no costs at all,
-            # which are phantom rows created by the outer merge with nothing in them.
+            # Never drop rows — only remove phantom rows with no cost data at all
             cost_cols = [c for c in ['vision_cost','wwe_actual_cost','nin_actual_cost','fedex_actual_cost']
                          if c in merged.columns]
             has_any_value = merged[cost_cols].notna().any(axis=1)
@@ -758,11 +954,15 @@ if st.button("Run Reconciliation", disabled=not ready):
             not_in_vision = merged[merged['status'] == 'NOT IN VISION']
             vision_only   = merged[merged['status'] == 'VISION ONLY']
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Mismatches",    len(mismatches))
-            col2.metric("Matched",       len(matches))
-            col3.metric("Not in Vision", len(not_in_vision))
-            col4.metric("Vision Only",   len(vision_only))
+            # Combine all duplicate frames
+            dup_df = pd.concat(all_dup_frames, ignore_index=True) if all_dup_frames else pd.DataFrame()
+
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Mismatches",         len(mismatches))
+            col2.metric("Matched",            len(matches))
+            col3.metric("Not in Vision",      len(not_in_vision))
+            col4.metric("Vision Only",        len(vision_only))
+            col5.metric("Possible Duplicates",len(dup_df))
 
             # Build labels for filename and Excel
             vendor_parts = []
@@ -780,7 +980,7 @@ if st.button("Run Reconciliation", disabled=not ready):
 
             filename = f"GSB_Shipping_Recon_{period_slug}.xlsx"
 
-            excel_buf = build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label)
+            excel_buf = build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label, dup_df)
             st.success("Reconciliation complete. Download your report below.")
             st.download_button(
                 label="Download Reconciliation Report (.xlsx)",
