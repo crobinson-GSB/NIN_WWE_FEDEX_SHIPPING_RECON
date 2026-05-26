@@ -142,7 +142,7 @@ with dcol1:
 with dcol2:
     period_end = st.date_input("Period End", value=None, key="period_end")
 
-st.markdown("### Vision Export")
+st.markdown("### Vision Export — Required")
 vision_file = st.file_uploader(
     "Vision Report (.txt or .xlsx export from Printsmith Vision)",
     type=["txt", "xlsx"],
@@ -150,17 +150,13 @@ vision_file = st.file_uploader(
 )
 
 st.markdown("### Vendor Invoices")
-col1, col2 = st.columns(2)
-with col1:
-    nin_files = st.file_uploader("NIN — Courier (.xls or .xlsx)", type=["xls", "xlsx"], key="nin", accept_multiple_files=True)
-with col2:
-    wwe_files = st.file_uploader("WWE — UPS (.xls or .xlsx)", type=["xls", "xlsx"], key="wwe", accept_multiple_files=True)
-
-col3, col4 = st.columns(2)
-with col3:
-    fedex_files = st.file_uploader("FedEx (.csv, .xls, or .xlsx)", type=["xls", "xlsx", "csv"], key="fedex", accept_multiple_files=True)
-with col4:
-    extra_file = st.file_uploader("Additional vendor (optional)", type=["xls", "xlsx", "csv"], key="extra")
+st.caption("Drop all vendor files here — NIN, WWE, FedEx, and Gelato are detected automatically. You can upload multiple files per vendor.")
+vendor_files = st.file_uploader(
+    "Vendor invoice files (NIN, WWE/UPS, FedEx, Gelato)",
+    type=["xls", "xlsx", "csv"],
+    key="vendors",
+    accept_multiple_files=True
+)
 
 st.markdown("<hr style='border: none; border-top: 1px solid #DDDDDD; margin: 1.5rem 0;'>", unsafe_allow_html=True)
 
@@ -187,6 +183,7 @@ REQUIRED_VISION  = {'Invoice', 'Cost', 'Amount', 'Sales Rep', 'Description', 'Pi
 REQUIRED_NIN     = {'Auth', 'AmountCharged', 'InvoiceNumber', 'OrderNumber'}
 REQUIRED_WWE     = {'Billing Reference 1', 'Charge Total', 'Invoice #', 'Airbill #'}
 REQUIRED_FEDEX   = {'Reference Notes Line 1', 'Net Charge Amount USD', 'Shipment Tracking Number', 'Invoice Number'}
+REQUIRED_GELATO  = {'Packages Order Number', 'Packages Gross Transaction Value', 'Packages Tracking Number', 'Packages First Scan Date'}
 
 def validate_columns(df, required, label):
     missing = required - set(df.columns)
@@ -281,7 +278,59 @@ def load_fedex(file):
     df['_source_file'] = file.name
     return df
 
-def combine_vendor_files(file_list, load_fn):
+def load_gelato(file):
+    if file.name.lower().endswith('.csv'):
+        try:
+            df = pd.read_csv(file, encoding='cp1252')
+        except UnicodeDecodeError:
+            file.seek(0)
+            df = pd.read_csv(file)
+    else:
+        df = read_excel_any(file)
+    if not validate_columns(df, REQUIRED_GELATO, 'Gelato'):
+        return None
+    df['Packages Gross Transaction Value'] = pd.to_numeric(
+        df['Packages Gross Transaction Value'], errors='coerce').fillna(0)
+    df['key'] = df['Packages Order Number'].apply(clean_key)
+    df = assign_unmatched_keys(df, 'key', 'GELATO')
+    df['_tracking'] = df['Packages Tracking Number'].astype(str).str.strip()
+    df['_source_file'] = file.name
+    return df
+
+def agg_gelato(df):
+    return df.groupby('key').agg(
+        gelato_actual_cost=('Packages Gross Transaction Value', 'sum'),
+        gelato_shipments=('Packages Tracking Number', 'count'),
+        gelato_raw_ref=('Packages Order Number', 'first'),
+        gelato_carrier=('Packages Carrier', 'first'),
+        gelato_date=('Packages First Scan Date', 'first')
+    ).reset_index()
+
+def detect_vendor(file):
+    """Read column headers only and return which vendor this file belongs to."""
+    try:
+        if file.name.lower().endswith('.csv'):
+            try:
+                df = pd.read_csv(file, nrows=1, encoding='cp1252')
+            except UnicodeDecodeError:
+                file.seek(0)
+                df = pd.read_csv(file, nrows=1)
+        else:
+            try:
+                df = pd.read_excel(file, nrows=1)
+            except Exception:
+                file.seek(0)
+                df = pd.read_excel(file, nrows=1, engine='xlrd')
+        file.seek(0)
+        cols = set(df.columns)
+        if REQUIRED_NIN.issubset(cols):     return 'nin'
+        if REQUIRED_WWE.issubset(cols):     return 'wwe'
+        if REQUIRED_FEDEX.issubset(cols):   return 'fedex'
+        if REQUIRED_GELATO.issubset(cols):  return 'gelato'
+        return 'unknown'
+    except Exception:
+        file.seek(0)
+        return 'unknown'
     """Load multiple files for the same vendor and combine into one dataframe.
     Keeps all rows — duplicates are flagged, never deleted."""
     frames = []
@@ -355,19 +404,22 @@ def agg_fedex(df):
     ).reset_index()
 
 def assign_status(row):
-    has_wwe   = pd.notna(row.get('wwe_actual_cost'))
-    has_nin   = pd.notna(row.get('nin_actual_cost'))
-    has_fedex = pd.notna(row.get('fedex_actual_cost'))
-    has_vis   = pd.notna(row.get('vision_cost')) and row.get('vision_cost', 0) != 0
-    if not has_vis and (has_wwe or has_nin or has_fedex):
+    has_wwe    = pd.notna(row.get('wwe_actual_cost'))
+    has_nin    = pd.notna(row.get('nin_actual_cost'))
+    has_fedex  = pd.notna(row.get('fedex_actual_cost'))
+    has_gelato = pd.notna(row.get('gelato_actual_cost'))
+    has_vis    = pd.notna(row.get('vision_cost')) and row.get('vision_cost', 0) != 0
+    if not has_vis and (has_wwe or has_nin or has_fedex or has_gelato):
         return "NOT IN VISION"
-    if has_wwe   and pd.notna(row.get('wwe_diff'))   and abs(row['wwe_diff'])   > 0.01:
+    if has_wwe    and pd.notna(row.get('wwe_diff'))    and abs(row['wwe_diff'])    > 0.01:
         return "MISMATCH"
-    if has_nin   and pd.notna(row.get('nin_diff'))   and abs(row['nin_diff'])   > 0.01:
+    if has_nin    and pd.notna(row.get('nin_diff'))    and abs(row['nin_diff'])    > 0.01:
         return "MISMATCH"
-    if has_fedex and pd.notna(row.get('fedex_diff')) and abs(row['fedex_diff']) > 0.01:
+    if has_fedex  and pd.notna(row.get('fedex_diff'))  and abs(row['fedex_diff'])  > 0.01:
         return "MISMATCH"
-    if (has_wwe or has_nin or has_fedex) and has_vis:
+    if has_gelato and pd.notna(row.get('gelato_diff')) and abs(row['gelato_diff']) > 0.01:
+        return "MISMATCH"
+    if (has_wwe or has_nin or has_fedex or has_gelato) and has_vis:
         return "MATCH"
     return "VISION ONLY"
 
@@ -417,7 +469,7 @@ def value_cell(ws, row, col, val, bold=False, color=DARK, fill=None):
         c.fill = PatternFill("solid", fgColor=fill)
     return c
 
-def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label, dup_df):
+def build_excel(merged, has_nin, has_wwe, has_fedex, has_gelato, vendors_label, period_label, dup_df):
     mismatches    = merged[merged['status'] == 'MISMATCH'].copy()
     matches       = merged[merged['status'] == 'MATCH'].copy()
     vision_only   = merged[merged['status'] == 'VISION ONLY'].copy()
@@ -491,12 +543,10 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label
     section_header(ws, 7, "TOTAL SPEND — All Matched & Reconciled Invoices")
 
     vendor_cols = []
-    if has_nin:
-        vendor_cols.append(('NIN (Courier)', 'nin_actual_cost', 'nin_diff'))
-    if has_wwe:
-        vendor_cols.append(('WWE / UPS', 'wwe_actual_cost', 'wwe_diff'))
-    if has_fedex:
-        vendor_cols.append(('FedEx', 'fedex_actual_cost', 'fedex_diff'))
+    if has_nin:    vendor_cols.append(('NIN (Courier)',  'nin_actual_cost',    'nin_diff'))
+    if has_wwe:    vendor_cols.append(('WWE / UPS',      'wwe_actual_cost',    'wwe_diff'))
+    if has_fedex:  vendor_cols.append(('FedEx',          'fedex_actual_cost',  'fedex_diff'))
+    if has_gelato: vendor_cols.append(('Gelato',         'gelato_actual_cost', 'gelato_diff'))
 
     col_labels = [""] + [v[0] for v in vendor_cols]
     if has_nin and has_wwe:
@@ -588,12 +638,10 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label
     row_n = 3
     for _, r in mismatches.sort_values('vision_invoice').iterrows():
         vendor_pairs = []
-        if has_wwe:
-            vendor_pairs.append(("WWE (UPS)", r.get('wwe_actual_cost'), r.get('wwe_diff'), r.get('wwe_invoice_num',''), r.get('wwe_shipments')))
-        if has_nin:
-            vendor_pairs.append(("NIN (Courier)", r.get('nin_actual_cost'), r.get('nin_diff'), r.get('nin_invoice_num',''), r.get('nin_shipments')))
-        if has_fedex:
-            vendor_pairs.append(("FedEx", r.get('fedex_actual_cost'), r.get('fedex_diff'), r.get('fedex_invoice_num',''), r.get('fedex_shipments')))
+        if has_wwe:    vendor_pairs.append(("WWE (UPS)",    r.get('wwe_actual_cost'),    r.get('wwe_diff'),    r.get('wwe_invoice_num',''),    r.get('wwe_shipments')))
+        if has_nin:    vendor_pairs.append(("NIN (Courier)",r.get('nin_actual_cost'),    r.get('nin_diff'),    r.get('nin_invoice_num',''),    r.get('nin_shipments')))
+        if has_fedex:  vendor_pairs.append(("FedEx",        r.get('fedex_actual_cost'),  r.get('fedex_diff'),  r.get('fedex_invoice_num',''),  r.get('fedex_shipments')))
+        if has_gelato: vendor_pairs.append(("Gelato",       r.get('gelato_actual_cost'), r.get('gelato_diff'), r.get('gelato_carrier',''),     r.get('gelato_shipments')))
         for vendor, cost, diff, inv, ships in vendor_pairs:
             if pd.notna(cost):
                 fill = RED_FILL if diff < -0.01 else (YELLOW_FILL if diff > 0.01 else GREEN_FILL)
@@ -636,12 +684,10 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label
     row_n3 = 3
     for _, r in matches.sort_values('vision_invoice').iterrows():
         vendor_pairs = []
-        if has_wwe:
-            vendor_pairs.append(("WWE (UPS)", r.get('wwe_actual_cost'), r.get('wwe_diff')))
-        if has_nin:
-            vendor_pairs.append(("NIN (Courier)", r.get('nin_actual_cost'), r.get('nin_diff')))
-        if has_fedex:
-            vendor_pairs.append(("FedEx", r.get('fedex_actual_cost'), r.get('fedex_diff')))
+        if has_wwe:    vendor_pairs.append(("WWE (UPS)",    r.get('wwe_actual_cost'),    r.get('wwe_diff')))
+        if has_nin:    vendor_pairs.append(("NIN (Courier)",r.get('nin_actual_cost'),    r.get('nin_diff')))
+        if has_fedex:  vendor_pairs.append(("FedEx",        r.get('fedex_actual_cost'),  r.get('fedex_diff')))
+        if has_gelato: vendor_pairs.append(("Gelato",       r.get('gelato_actual_cost'), r.get('gelato_diff')))
         for vendor, cost, diff in vendor_pairs:
             if pd.notna(cost):
                 ws3.row_dimensions[row_n3].height = 18
@@ -682,12 +728,10 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label
         row_n = start_row + 2
         for _, r in rows_df.sort_values('key').iterrows():
             vendor_pairs = []
-            if has_wwe:
-                vendor_pairs.append(("WWE (UPS)",    r.get('wwe_actual_cost'),   r.get('wwe_shipments'),   r.get('wwe_invoice_num',''),   r.get('wwe_raw_ref','')))
-            if has_nin:
-                vendor_pairs.append(("NIN (Courier)",r.get('nin_actual_cost'),   r.get('nin_shipments'),   r.get('nin_invoice_num',''),   r.get('nin_raw_ref','')))
-            if has_fedex:
-                vendor_pairs.append(("FedEx",        r.get('fedex_actual_cost'), r.get('fedex_shipments'), r.get('fedex_invoice_num',''), r.get('fedex_raw_ref','')))
+            if has_wwe:    vendor_pairs.append(("WWE (UPS)",    r.get('wwe_actual_cost'),    r.get('wwe_shipments'),    r.get('wwe_invoice_num',''),    r.get('wwe_raw_ref','')))
+            if has_nin:    vendor_pairs.append(("NIN (Courier)",r.get('nin_actual_cost'),    r.get('nin_shipments'),    r.get('nin_invoice_num',''),    r.get('nin_raw_ref','')))
+            if has_fedex:  vendor_pairs.append(("FedEx",        r.get('fedex_actual_cost'),  r.get('fedex_shipments'),  r.get('fedex_invoice_num',''),  r.get('fedex_raw_ref','')))
+            if has_gelato: vendor_pairs.append(("Gelato",       r.get('gelato_actual_cost'), r.get('gelato_shipments'), r.get('gelato_carrier',''),     r.get('gelato_raw_ref','')))
             for vendor, cost, ships, inv, raw_ref in vendor_pairs:
                 if pd.notna(cost):
                     ws.row_dimensions[row_n].height = 18
@@ -882,14 +926,47 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label
     return buf
 
 # ── Ready check ──
-ready = vision_file and (nin_files or wwe_files or fedex_files)
+ready = vision_file and len(vendor_files) > 0
 
 if st.button("Run Reconciliation", disabled=not ready):
     with st.spinner("Matching invoices and calculating discrepancies..."):
         try:
-            has_nin   = len(nin_files) > 0
-            has_wwe   = len(wwe_files) > 0
-            has_fedex = len(fedex_files) > 0
+            # Route each uploaded vendor file to the correct bucket by reading its columns
+            nin_files    = []
+            wwe_files    = []
+            fedex_files  = []
+            gelato_files = []
+            unknown_files = []
+
+            for f in vendor_files:
+                vendor_type = detect_vendor(f)
+                if vendor_type == 'nin':        nin_files.append(f)
+                elif vendor_type == 'wwe':      wwe_files.append(f)
+                elif vendor_type == 'fedex':    fedex_files.append(f)
+                elif vendor_type == 'gelato':   gelato_files.append(f)
+                else:                           unknown_files.append(f)
+
+            if unknown_files:
+                st.warning(f"Could not identify {len(unknown_files)} file(s): "
+                           f"{', '.join(f.name for f in unknown_files)}. "
+                           f"These were skipped. Make sure they are NIN, WWE, FedEx, or Gelato exports.")
+
+            has_nin    = len(nin_files) > 0
+            has_wwe    = len(wwe_files) > 0
+            has_fedex  = len(fedex_files) > 0
+            has_gelato = len(gelato_files) > 0
+
+            if not (has_nin or has_wwe or has_fedex or has_gelato):
+                st.error("No recognizable vendor files found. Please upload at least one NIN, WWE, FedEx, or Gelato invoice.")
+                st.stop()
+
+            # Show what was detected
+            detected = []
+            if has_nin:    detected.append(f"NIN ({len(nin_files)} file{'s' if len(nin_files)>1 else ''})")
+            if has_wwe:    detected.append(f"WWE ({len(wwe_files)} file{'s' if len(wwe_files)>1 else ''})")
+            if has_fedex:  detected.append(f"FedEx ({len(fedex_files)} file{'s' if len(fedex_files)>1 else ''})")
+            if has_gelato: detected.append(f"Gelato ({len(gelato_files)} file{'s' if len(gelato_files)>1 else ''})")
+            st.info(f"Detected: {', '.join(detected)}")
 
             vision_agg = load_vision(vision_file)
             if vision_agg is None:
@@ -900,52 +977,55 @@ if st.button("Run Reconciliation", disabled=not ready):
 
             if has_wwe:
                 wwe_combined = combine_vendor_files(wwe_files, load_wwe)
-                if wwe_combined is None:
-                    st.stop()
+                if wwe_combined is None: st.stop()
                 wwe_combined, wwe_dups = flag_duplicates(
                     wwe_combined, '_tracking', 'Charge Total', 'Ship date',
                     'Billing Reference 1', 'WWE / UPS')
-                if not wwe_dups.empty:
-                    all_dup_frames.append(wwe_dups)
+                if not wwe_dups.empty: all_dup_frames.append(wwe_dups)
                 wwe_agg = agg_wwe(wwe_combined)
                 merged = merged.merge(wwe_agg, on='key', how='outer')
 
             if has_nin:
                 nin_combined = combine_vendor_files(nin_files, load_nin)
-                if nin_combined is None:
-                    st.stop()
+                if nin_combined is None: st.stop()
                 nin_combined, nin_dups = flag_duplicates(
                     nin_combined, '_tracking', 'AmountCharged', 'Orderdate',
                     'Auth', 'NIN (Courier)')
-                if not nin_dups.empty:
-                    all_dup_frames.append(nin_dups)
+                if not nin_dups.empty: all_dup_frames.append(nin_dups)
                 nin_agg = agg_nin(nin_combined)
                 merged = merged.merge(nin_agg, on='key', how='outer')
 
             if has_fedex:
                 fedex_combined = combine_vendor_files(fedex_files, load_fedex)
-                if fedex_combined is None:
-                    st.stop()
+                if fedex_combined is None: st.stop()
                 fedex_combined, fedex_dups = flag_duplicates(
                     fedex_combined, '_tracking', 'Net Charge Amount USD',
                     'Shipment Date (mm/dd/yyyy)', 'Reference Notes Line 1', 'FedEx')
-                if not fedex_dups.empty:
-                    all_dup_frames.append(fedex_dups)
+                if not fedex_dups.empty: all_dup_frames.append(fedex_dups)
                 fedex_agg = agg_fedex(fedex_combined)
                 merged = merged.merge(fedex_agg, on='key', how='outer')
 
+            if has_gelato:
+                gelato_combined = combine_vendor_files(gelato_files, load_gelato)
+                if gelato_combined is None: st.stop()
+                gelato_combined, gelato_dups = flag_duplicates(
+                    gelato_combined, '_tracking', 'Packages Gross Transaction Value',
+                    'Packages First Scan Date', 'Packages Order Number', 'Gelato')
+                if not gelato_dups.empty: all_dup_frames.append(gelato_dups)
+                gelato_agg = agg_gelato(gelato_combined)
+                merged = merged.merge(gelato_agg, on='key', how='outer')
+
             # Never drop rows — only remove phantom rows with no cost data at all
-            cost_cols = [c for c in ['vision_cost','wwe_actual_cost','nin_actual_cost','fedex_actual_cost']
+            cost_cols = [c for c in ['vision_cost','wwe_actual_cost','nin_actual_cost',
+                                     'fedex_actual_cost','gelato_actual_cost']
                          if c in merged.columns]
             has_any_value = merged[cost_cols].notna().any(axis=1)
             merged = merged[has_any_value].copy()
 
-            if has_wwe:
-                merged['wwe_diff']   = (merged['wwe_actual_cost']   - merged['vision_cost']).round(2)
-            if has_nin:
-                merged['nin_diff']   = (merged['nin_actual_cost']   - merged['vision_cost']).round(2)
-            if has_fedex:
-                merged['fedex_diff'] = (merged['fedex_actual_cost'] - merged['vision_cost']).round(2)
+            if has_wwe:    merged['wwe_diff']    = (merged['wwe_actual_cost']    - merged['vision_cost']).round(2)
+            if has_nin:    merged['nin_diff']    = (merged['nin_actual_cost']    - merged['vision_cost']).round(2)
+            if has_fedex:  merged['fedex_diff']  = (merged['fedex_actual_cost']  - merged['vision_cost']).round(2)
+            if has_gelato: merged['gelato_diff'] = (merged['gelato_actual_cost'] - merged['vision_cost']).round(2)
 
             merged['status'] = merged.apply(assign_status, axis=1)
 
@@ -953,22 +1033,20 @@ if st.button("Run Reconciliation", disabled=not ready):
             matches       = merged[merged['status'] == 'MATCH']
             not_in_vision = merged[merged['status'] == 'NOT IN VISION']
             vision_only   = merged[merged['status'] == 'VISION ONLY']
-
-            # Combine all duplicate frames
-            dup_df = pd.concat(all_dup_frames, ignore_index=True) if all_dup_frames else pd.DataFrame()
+            dup_df        = pd.concat(all_dup_frames, ignore_index=True) if all_dup_frames else pd.DataFrame()
 
             col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("Mismatches",         len(mismatches))
-            col2.metric("Matched",            len(matches))
-            col3.metric("Not in Vision",      len(not_in_vision))
-            col4.metric("Vision Only",        len(vision_only))
-            col5.metric("Possible Duplicates",len(dup_df))
+            col1.metric("Mismatches",          len(mismatches))
+            col2.metric("Matched",             len(matches))
+            col3.metric("Not in Vision",       len(not_in_vision))
+            col4.metric("Vision Only",         len(vision_only))
+            col5.metric("Possible Duplicates", len(dup_df))
 
-            # Build labels for filename and Excel
             vendor_parts = []
-            if has_nin:   vendor_parts.append("NIN")
-            if has_wwe:   vendor_parts.append("WWE")
-            if has_fedex: vendor_parts.append("FedEx")
+            if has_nin:    vendor_parts.append("NIN")
+            if has_wwe:    vendor_parts.append("WWE")
+            if has_fedex:  vendor_parts.append("FedEx")
+            if has_gelato: vendor_parts.append("Gelato")
             vendors_label = " + ".join(vendor_parts)
 
             if period_start and period_end:
@@ -978,9 +1056,9 @@ if st.button("Run Reconciliation", disabled=not ready):
                 period_label = "Period not specified"
                 period_slug  = date.today().strftime('%Y%m%d')
 
-            filename = f"GSB_Shipping_Recon_{period_slug}.xlsx"
-
-            excel_buf = build_excel(merged, has_nin, has_wwe, has_fedex, vendors_label, period_label, dup_df)
+            filename  = f"GSB_Shipping_Recon_{period_slug}.xlsx"
+            excel_buf = build_excel(merged, has_nin, has_wwe, has_fedex, has_gelato,
+                                    vendors_label, period_label, dup_df)
             st.success("Reconciliation complete. Download your report below.")
             st.download_button(
                 label="Download Reconciliation Report (.xlsx)",
@@ -996,6 +1074,6 @@ if st.button("Run Reconciliation", disabled=not ready):
 
 elif not ready:
     if not vision_file:
-        st.info("Upload the Vision export to get started. Then add at least one vendor invoice (NIN, WWE, or FedEx).")
+        st.info("Upload the Vision export to get started. Then drop your vendor invoice files in the box below.")
     else:
-        st.info("Vision file uploaded. Now add at least one vendor invoice (NIN, WWE, or FedEx) to run the reconciliation.")
+        st.info("Vision file uploaded. Now drop at least one vendor invoice file to run the reconciliation.")
