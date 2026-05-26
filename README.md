@@ -5,7 +5,8 @@ Upload your Vision export and vendor invoices to automatically match and flag sh
 ## Supported Vendors
 - NIN (Courier) — .xls invoice
 - WWE / UPS — .xls invoice
-- FedEx — coming soon
+- FedEx — .xls invoice
+- Gelato Logistics Invoice
 
 ## How to use
 1. Go to the app URL
