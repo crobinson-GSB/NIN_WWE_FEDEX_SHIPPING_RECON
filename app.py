@@ -211,8 +211,10 @@ def load_vision(file):
     df['Cost'] = pd.to_numeric(df['Cost'], errors='coerce').fillna(0)
     df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
     df['key'] = df['Invoice'].apply(clean_key)
+    df['Invoice_clean'] = df['key']
     return df.groupby('key').agg(
-        vision_invoice=('Invoice', 'first'),
+        vision_invoice=('Invoice_clean', 'first'),
+        vision_invoice_raw=('Invoice', 'first'),
         vision_sales_rep=('Sales Rep', 'first'),
         vision_billed=('Amount', 'sum'),
         vision_cost=('Cost', 'sum'),
@@ -674,10 +676,10 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, has_gelato, vendors_label, 
     ws2['A1'].fill = PatternFill("solid", fgColor=ORANGE)
     ws2['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws2.row_dimensions[1].height = 35
-    for i, h in enumerate(["GSB Invoice #","Sales Rep","Date","Description","Vendor",
+    for i, h in enumerate(["GSB Invoice #","Raw Invoice #","Sales Rep","Date","Description","Vendor",
                             "Vendor Invoice #","# Shipments","Vision Cost","Actual Vendor Cost","Difference ($)"], 1):
         hdr(ws2.cell(row=2, column=i, value=h))
-    for i, w in enumerate([16,14,12,35,12,18,12,18,20,16], 1):
+    for i, w in enumerate([14,16,12,10,32,12,16,10,14,18,14], 1):
         ws2.column_dimensions[get_column_letter(i)].width = w
     row_n = 3
     for _, r in mismatches.sort_values('vision_invoice').iterrows():
@@ -689,20 +691,20 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, has_gelato, vendors_label, 
         for vendor, cost, diff, inv, ships in vendor_pairs:
             if pd.notna(cost):
                 fill = RED_FILL if diff < -0.01 else (YELLOW_FILL if diff > 0.01 else GREEN_FILL)
-                row_data = [r['vision_invoice'], r['vision_sales_rep'], r['vision_date'],
+                row_data = [r['vision_invoice'], r.get('vision_invoice_raw',''), r['vision_sales_rep'], r['vision_date'],
                             r['vision_description'], vendor, inv,
                             int(ships) if pd.notna(ships) else '', r['vision_cost'], cost, round(diff, 2)]
                 ws2.row_dimensions[row_n].height = 18
                 for ci, val in enumerate(row_data, 1):
                     c = ws2.cell(row=row_n, column=ci, value=val)
-                    body(c, center=(ci in [1,3,5,6,7,8,9,10]), fill=fill if ci in [8,9,10] else None)
-                    if ci in [8, 9, 10]:
+                    body(c, center=(ci in [1,2,4,6,7,8,9,10,11]), fill=fill if ci in [9,10,11] else None)
+                    if ci in [9, 10, 11]:
                         c.number_format = '$#,##0.00'
                 row_n += 1
     ws2.row_dimensions[row_n].height = 22
-    ws2.cell(row=row_n, column=7, value="TOTALS").font = Font(name="Arial", bold=True, size=10)
-    ws2.cell(row=row_n, column=7).alignment = Alignment(horizontal="right")
-    for ci in [8, 9, 10]:
+    ws2.cell(row=row_n, column=8, value="TOTALS").font = Font(name="Arial", bold=True, size=10)
+    ws2.cell(row=row_n, column=8).alignment = Alignment(horizontal="right")
+    for ci in [9, 10, 11]:
         cl = get_column_letter(ci)
         c = ws2.cell(row=row_n, column=ci, value=f'=SUM({cl}3:{cl}{row_n-1})')
         c.font = Font(name="Arial", bold=True, size=10)
@@ -720,10 +722,10 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, has_gelato, vendors_label, 
     ws3['A1'].fill = PatternFill("solid", fgColor="2E7D32")
     ws3['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws3.row_dimensions[1].height = 35
-    for i, h in enumerate(["GSB Invoice #","Sales Rep","Date","Vendor","Vendor Invoice #",
+    for i, h in enumerate(["GSB Invoice #","Raw Invoice #","Sales Rep","Date","Vendor","Vendor Invoice #",
                             "Vision Cost","Vendor Cost","Difference","Status"], 1):
         hdr(ws3.cell(row=2, column=i, value=h), bg="2E7D32")
-    for i, w in enumerate([16,14,12,14,18,18,16,14,10], 1):
+    for i, w in enumerate([14,16,12,10,12,16,14,14,12,8], 1):
         ws3.column_dimensions[get_column_letter(i)].width = w
     row_n3 = 3
     for _, r in matches.sort_values('vision_invoice').iterrows():
@@ -735,11 +737,12 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, has_gelato, vendors_label, 
         for vendor, cost, diff in vendor_pairs:
             if pd.notna(cost):
                 ws3.row_dimensions[row_n3].height = 18
-                for ci, val in enumerate([r['vision_invoice'], r['vision_sales_rep'], r['vision_date'],
+                for ci, val in enumerate([r['vision_invoice'], r.get('vision_invoice_raw',''),
+                                          r['vision_sales_rep'], r['vision_date'],
                                           vendor, '', r['vision_cost'], cost, round(diff, 2), "✓"], 1):
                     c = ws3.cell(row=row_n3, column=ci, value=val)
-                    body(c, center=(ci in [1,3,4,5,6,7,8,9]), fill=GREEN_FILL if ci == 9 else None)
-                    if ci in [6, 7, 8]:
+                    body(c, center=(ci in [1,2,4,5,6,7,8,9,10]), fill=GREEN_FILL if ci == 10 else None)
+                    if ci in [7, 8, 9]:
                         c.number_format = '$#,##0.00'
                 row_n3 += 1
 
@@ -832,19 +835,20 @@ def build_excel(merged, has_nin, has_wwe, has_fedex, has_gelato, vendors_label, 
     ws5['A1'].fill = PatternFill("solid", fgColor="455A64")
     ws5['A1'].alignment = Alignment(horizontal="center", vertical="center")
     ws5.row_dimensions[1].height = 35
-    for i, h in enumerate(["GSB Invoice #","Sales Rep","Date","Description",
+    for i, h in enumerate(["GSB Invoice #","Raw Invoice #","Sales Rep","Date","Description",
                             "Amount Billed","Cost Recorded","Notes"], 1):
         hdr(ws5.cell(row=2, column=i, value=h), bg="455A64")
-    for i, w in enumerate([16,14,12,40,16,16,30], 1):
+    for i, w in enumerate([14,16,12,10,36,14,14,28], 1):
         ws5.column_dimensions[get_column_letter(i)].width = w
     row_n5 = 3
     for _, r in vision_only.sort_values('vision_invoice').iterrows():
         ws5.row_dimensions[row_n5].height = 18
-        for ci, val in enumerate([r['vision_invoice'], r['vision_sales_rep'], r['vision_date'],
+        for ci, val in enumerate([r['vision_invoice'], r.get('vision_invoice_raw',''),
+                                   r['vision_sales_rep'], r['vision_date'],
                                    r['vision_description'], r['vision_billed'], r['vision_cost'], ""], 1):
             c = ws5.cell(row=row_n5, column=ci, value=val)
-            body(c, center=(ci in [1,2,3,5,6]))
-            if ci in [5, 6]:
+            body(c, center=(ci in [1,2,3,4,6,7]))
+            if ci in [6, 7]:
                 c.number_format = '$#,##0.00'
         row_n5 += 1
 
