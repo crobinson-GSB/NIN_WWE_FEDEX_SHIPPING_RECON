@@ -184,6 +184,7 @@ REQUIRED_NIN     = {'Auth', 'AmountCharged', 'InvoiceNumber', 'OrderNumber'}
 REQUIRED_WWE     = {'Billing Reference 1', 'Charge Total', 'Invoice #', 'Airbill #'}
 REQUIRED_FEDEX   = {'Reference Notes Line 1', 'Net Charge Amount USD', 'Shipment Tracking Number', 'Invoice Number'}
 REQUIRED_GELATO  = {'Packages Order Number', 'Packages Gross Transaction Value', 'Packages Tracking Number', 'Packages First Scan Date'}
+REQUIRED_GELATO2 = {'orderReferenceId', 'costTotal', 'trackingNumber', 'orderDate'}
 
 def validate_columns(df, required, label):
     missing = required - set(df.columns)
@@ -287,23 +288,53 @@ def load_gelato(file):
             df = pd.read_csv(file)
     else:
         df = read_excel_any(file)
-    if not validate_columns(df, REQUIRED_GELATO, 'Gelato'):
+
+    cols = set(df.columns)
+
+    # Excel format (Packages Order Number etc.)
+    if REQUIRED_GELATO.issubset(cols):
+        if not validate_columns(df, REQUIRED_GELATO, 'Gelato'):
+            return None
+        df['Packages Gross Transaction Value'] = pd.to_numeric(
+            df['Packages Gross Transaction Value'], errors='coerce').fillna(0)
+        df['key'] = df['Packages Order Number'].apply(clean_key)
+        df = assign_unmatched_keys(df, 'key', 'GELATO')
+        df['_tracking'] = df['Packages Tracking Number'].astype(str).str.strip()
+        df['_source_file'] = file.name
+        df['_cost'] = df['Packages Gross Transaction Value']
+        df['_date'] = df['Packages First Scan Date']
+        df['_ref'] = df['Packages Order Number'].astype(str)
+        df['_carrier'] = df['Packages Carrier'] if 'Packages Carrier' in df.columns else 'Gelato'
+
+    # CSV format (orderReferenceId etc.)
+    elif REQUIRED_GELATO2.issubset(cols):
+        df['costTotal'] = pd.to_numeric(df['costTotal'], errors='coerce').fillna(0)
+        # Extract leading GSB invoice number from orderReferenceId
+        def extract_gsb(val):
+            if pd.isna(val): return ''
+            m = re.match(r'^(\d{6,7})', str(val).strip())
+            return m.group(1) if m else clean_key(val)
+        df['key'] = df['orderReferenceId'].apply(extract_gsb)
+        df = assign_unmatched_keys(df, 'key', 'GELATO')
+        df['_tracking'] = df['trackingNumber'].astype(str).str.strip()
+        df['_source_file'] = file.name
+        df['_cost'] = df['costTotal']
+        df['_date'] = df['orderDate']
+        df['_ref'] = df['orderReferenceId'].astype(str)
+        df['_carrier'] = df['shippingMethodCarrier'] if 'shippingMethodCarrier' in df.columns else 'Gelato'
+    else:
+        st.error("The Gelato file format wasn't recognized. Expected either the Excel export (Packages Order Number) or CSV export (orderReferenceId).")
         return None
-    df['Packages Gross Transaction Value'] = pd.to_numeric(
-        df['Packages Gross Transaction Value'], errors='coerce').fillna(0)
-    df['key'] = df['Packages Order Number'].apply(clean_key)
-    df = assign_unmatched_keys(df, 'key', 'GELATO')
-    df['_tracking'] = df['Packages Tracking Number'].astype(str).str.strip()
-    df['_source_file'] = file.name
+
     return df
 
 def agg_gelato(df):
     return df.groupby('key').agg(
-        gelato_actual_cost=('Packages Gross Transaction Value', 'sum'),
-        gelato_shipments=('Packages Tracking Number', 'count'),
-        gelato_raw_ref=('Packages Order Number', 'first'),
-        gelato_carrier=('Packages Carrier', 'first'),
-        gelato_date=('Packages First Scan Date', 'first')
+        gelato_actual_cost=('_cost', 'sum'),
+        gelato_shipments=('_tracking', 'count'),
+        gelato_raw_ref=('_ref', 'first'),
+        gelato_carrier=('_carrier', 'first'),
+        gelato_date=('_date', 'first')
     ).reset_index()
 
 def detect_vendor(file):
@@ -323,14 +354,27 @@ def detect_vendor(file):
                 df = pd.read_excel(file, nrows=1, engine='xlrd')
         file.seek(0)
         cols = set(df.columns)
-        if REQUIRED_NIN.issubset(cols):     return 'nin'
-        if REQUIRED_WWE.issubset(cols):     return 'wwe'
-        if REQUIRED_FEDEX.issubset(cols):   return 'fedex'
-        if REQUIRED_GELATO.issubset(cols):  return 'gelato'
+        if REQUIRED_NIN.issubset(cols):              return 'nin'
+        if REQUIRED_WWE.issubset(cols):              return 'wwe'
+        if REQUIRED_FEDEX.issubset(cols):            return 'fedex'
+        if REQUIRED_GELATO.issubset(cols):           return 'gelato'
+        if REQUIRED_GELATO2.issubset(cols):          return 'gelato'
         return 'unknown'
     except Exception:
         file.seek(0)
         return 'unknown'
+    """Load multiple files for the same vendor and combine into one dataframe.
+    Keeps all rows — duplicates are flagged, never deleted."""
+    frames = []
+    for f in file_list:
+        df = load_fn(f)
+        if df is not None:
+            frames.append(df)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+def combine_vendor_files(file_list, load_fn):
     """Load multiple files for the same vendor and combine into one dataframe.
     Keeps all rows — duplicates are flagged, never deleted."""
     frames = []
@@ -1009,8 +1053,8 @@ if st.button("Run Reconciliation", disabled=not ready):
                 gelato_combined = combine_vendor_files(gelato_files, load_gelato)
                 if gelato_combined is None: st.stop()
                 gelato_combined, gelato_dups = flag_duplicates(
-                    gelato_combined, '_tracking', 'Packages Gross Transaction Value',
-                    'Packages First Scan Date', 'Packages Order Number', 'Gelato')
+                    gelato_combined, '_tracking', '_cost', '_date',
+                    '_ref', 'Gelato')
                 if not gelato_dups.empty: all_dup_frames.append(gelato_dups)
                 gelato_agg = agg_gelato(gelato_combined)
                 merged = merged.merge(gelato_agg, on='key', how='outer')
