@@ -13,6 +13,49 @@ st.set_page_config(
     layout="centered"
 )
 
+# ── Error code system ──
+# Every failure point raises a ReconError with a code, plain-English title,
+# and actionable guidance. The run block catches these and shows a structured
+# error card instead of a raw Python traceback.
+
+class ReconError(Exception):
+    def __init__(self, code, title, detail, fix):
+        self.code   = code    # e.g. "VIS-001"
+        self.title  = title   # short plain-English description
+        self.detail = detail  # what specifically went wrong
+        self.fix    = fix     # what the user should do
+        super().__init__(title)
+
+def show_error(e):
+    if isinstance(e, ReconError):
+        st.markdown(f"""
+<div style='background:#FFF0F0; border-left:4px solid #CC0000; border-radius:6px; padding:1rem 1.25rem; margin:1rem 0;'>
+<div style='font-size:11px; color:#999; font-family:monospace; margin-bottom:4px;'>ERROR {e.code}</div>
+<div style='font-size:15px; font-weight:600; color:#CC0000; margin-bottom:6px;'>{e.title}</div>
+<div style='font-size:13px; color:#2B2B2B; margin-bottom:10px;'>{e.detail}</div>
+<div style='font-size:13px; background:#fff; border-radius:4px; padding:8px 12px; border:1px solid #FFCCCC;'>
+<strong>What to do:</strong> {e.fix}
+</div>
+</div>
+""", unsafe_allow_html=True)
+    else:
+        # Unexpected error — show code and a generic message
+        import traceback
+        tb_str = traceback.format_exc()
+        st.markdown(f"""
+<div style='background:#FFF0F0; border-left:4px solid #CC0000; border-radius:6px; padding:1rem 1.25rem; margin:1rem 0;'>
+<div style='font-size:11px; color:#999; font-family:monospace; margin-bottom:4px;'>ERROR SYS-999 — UNEXPECTED</div>
+<div style='font-size:15px; font-weight:600; color:#CC0000; margin-bottom:6px;'>Something unexpected went wrong</div>
+<div style='font-size:13px; color:#2B2B2B; margin-bottom:10px;'>The tool hit an error it didn't anticipate. The technical details are below.</div>
+<div style='font-size:13px; background:#fff; border-radius:4px; padding:8px 12px; border:1px solid #FFCCCC;'>
+<strong>What to do:</strong> Take a screenshot of this error and send it to whoever maintains this tool. Include the files you were trying to upload.
+</div>
+<details><summary style='font-size:12px; color:#999; margin-top:8px; cursor:pointer;'>Technical details (click to expand)</summary>
+<pre style='font-size:11px; color:#666; margin-top:6px; white-space:pre-wrap;'>{str(e)}\n\n{tb_str}</pre>
+</details>
+</div>
+""", unsafe_allow_html=True)
+
 st.markdown("""
 <style>
     .stApp { background-color: #f9f9f9; }
@@ -174,52 +217,193 @@ def clean_key(val):
 
 def read_excel_any(file):
     """Read .xls or .xlsx without assuming engine."""
-    if file.name.lower().endswith('.xlsx'):
-        return pd.read_excel(file)
-    else:
-        return pd.read_excel(file, engine='xlrd')
+    try:
+        if file.name.lower().endswith('.xlsx'):
+            return pd.read_excel(file)
+        else:
+            return pd.read_excel(file, engine='xlrd')
+    except Exception as ex:
+        raise ReconError(
+            code="FILE-001",
+            title=f"Could not open file: {file.name}",
+            detail=f"The file could not be read. Error: {ex}",
+            fix="Make sure the file isn't open in Excel or another program, isn't password protected, "
+                "and is a valid .xls or .xlsx file. Try re-downloading it from the vendor portal."
+        )
 
 REQUIRED_VISION  = {'Invoice', 'Cost', 'Amount', 'Sales Rep', 'Description', 'Pickup Date'}
-REQUIRED_NIN     = {'Auth', 'AmountCharged', 'InvoiceNumber', 'OrderNumber'}
-REQUIRED_WWE     = {'Billing Reference 1', 'Charge Total', 'Invoice #', 'Airbill #'}
-REQUIRED_FEDEX   = {'Reference Notes Line 1', 'Net Charge Amount USD', 'Shipment Tracking Number', 'Invoice Number'}
-REQUIRED_GELATO  = {'Packages Order Number', 'Packages Gross Transaction Value', 'Packages Tracking Number', 'Packages First Scan Date'}
-REQUIRED_GELATO2 = {'orderReferenceId', 'costTotal', 'trackingNumber', 'orderDate'}
+# ── Fuzzy column matching ──
+# Each entry is a list of keywords. A column matches if it contains ALL keywords
+# (case-insensitive). The tool finds the best matching actual column for each
+# required field, so minor vendor renames (e.g. adding "(Default)", changing
+# spaces to underscores) are handled automatically.
 
-def validate_columns(df, required, label):
-    missing = required - set(df.columns)
-    if missing:
-        st.error(
-            f"The file uploaded for **{label}** doesn't look right. "
-            f"Expected columns not found: {', '.join(sorted(missing))}. "
-            f"Make sure you're uploading the correct file in the correct box."
+FUZZY_VISION  = {
+    'Invoice':      ['invoice'],
+    'Cost':         ['cost'],
+    'Amount':       ['amount'],
+    'Sales Rep':    ['sales', 'rep'],
+    'Description':  ['description'],
+    'Pickup Date':  ['pickup', 'date'],
+}
+FUZZY_NIN = {
+    'Auth':          ['auth'],
+    'AmountCharged': ['amount', 'charge'],
+    'InvoiceNumber': ['invoice', 'number'],
+    'OrderNumber':   ['order', 'number'],
+    'Orderdate':     ['order', 'date'],
+}
+FUZZY_WWE = {
+    'Billing Reference 1': ['billing', 'reference'],
+    'Charge Total':        ['charge', 'total'],
+    'Invoice #':           ['invoice'],
+    'Airbill #':           ['airbill'],
+    'Ship date':           ['ship', 'date'],
+}
+FUZZY_FEDEX = {
+    'Reference Notes Line 1':     ['reference', 'notes'],
+    'Net Charge Amount USD':      ['net', 'charge'],
+    'Shipment Tracking Number':   ['tracking', 'number'],
+    'Invoice Number':             ['invoice', 'number'],
+    'Shipment Date (mm/dd/yyyy)': ['shipment', 'date'],
+}
+FUZZY_GELATO = {
+    'Packages Order Number':              ['order', 'number'],
+    'Packages Tracking Number':           ['tracking', 'number'],
+    'Packages First Scan Date':           ['scan', 'date'],
+    'Packages Gross Transaction Value':   ['gross', 'transaction', 'value'],
+    'Packages Carrier':                   ['carrier'],
+}
+FUZZY_GELATO2 = {
+    'orderReferenceId': ['reference'],
+    'costTotal':        ['cost'],
+    'trackingNumber':   ['tracking'],
+    'orderDate':        ['date'],
+}
+
+def fuzzy_find_col(df_cols, keywords):
+    """Find the first column whose name contains all keywords (case-insensitive)."""
+    cols_lower = [c.lower() for c in df_cols]
+    for i, col_lower in enumerate(cols_lower):
+        if all(kw.lower() in col_lower for kw in keywords):
+            return df_cols[i]
+    return None
+
+def build_col_map(df, fuzzy_spec):
+    """
+    Build a mapping from canonical field name → actual column name in df.
+    Returns (col_map, missing) where missing is a list of fields not found.
+    """
+    col_map = {}
+    missing = []
+    df_cols = list(df.columns)
+    for canonical, keywords in fuzzy_spec.items():
+        found = fuzzy_find_col(df_cols, keywords)
+        if found:
+            col_map[canonical] = found
+        else:
+            missing.append(canonical)
+    return col_map, missing
+
+def fuzzy_detect_vendor(df):
+    """Identify which vendor a dataframe belongs to using fuzzy column matching."""
+    scores = {}
+    for vendor, spec in [('vision', FUZZY_VISION), ('nin', FUZZY_NIN),
+                          ('wwe', FUZZY_WWE), ('fedex', FUZZY_FEDEX),
+                          ('gelato', FUZZY_GELATO), ('gelato2', FUZZY_GELATO2)]:
+        _, missing = build_col_map(df, spec)
+        scores[vendor] = len(spec) - len(missing)
+    best = max(scores, key=scores.get)
+    best_score = scores[best]
+    total = len({'vision': FUZZY_VISION, 'nin': FUZZY_NIN, 'wwe': FUZZY_WWE,
+                 'fedex': FUZZY_FEDEX, 'gelato': FUZZY_GELATO,
+                 'gelato2': FUZZY_GELATO2}[best if best != 'gelato2' else 'gelato2'])
+    # Must match at least 60% of expected columns to be confident
+    if best_score / total < 0.6:
+        return 'unknown', {}
+    col_map, _ = build_col_map(df, {'vision': FUZZY_VISION, 'nin': FUZZY_NIN,
+                                     'wwe': FUZZY_WWE, 'fedex': FUZZY_FEDEX,
+                                     'gelato': FUZZY_GELATO,
+                                     'gelato2': FUZZY_GELATO2}[best if best != 'gelato2' else 'gelato2'])
+    return ('gelato' if best == 'gelato2' else best), col_map
+
+def validate_columns(df, fuzzy_spec, label):
+    """Fuzzy validation — raises ReconError if too many columns missing."""
+    col_map, missing = build_col_map(df, fuzzy_spec)
+    if len(missing) > len(fuzzy_spec) * 0.4:
+        raise ReconError(
+            code="COL-001",
+            title=f"Unrecognized file format — {label}",
+            detail=f"The file doesn't look like a {label} export. "
+                   f"Could not find columns matching: {', '.join(sorted(missing))}. "
+                   f"Columns found in the file: {', '.join(list(df.columns)[:8])}{'...' if len(df.columns) > 8 else ''}.",
+            fix=f"Make sure you're uploading the correct {label} export file. "
+                f"If the vendor recently changed their export format, the column names "
+                f"may have changed enough that the tool can't recognize them. "
+                f"Contact whoever maintains this tool and share the file."
         )
-        return False
-    return True
+    return col_map
+
+# Keep these for detect_vendor file-level detection (reads only header row)
+REQUIRED_NIN    = {'Auth', 'AmountCharged', 'InvoiceNumber', 'OrderNumber'}
+REQUIRED_WWE    = {'Billing Reference 1', 'Charge Total', 'Invoice #', 'Airbill #'}
+REQUIRED_FEDEX  = {'Reference Notes Line 1', 'Net Charge Amount USD', 'Shipment Tracking Number', 'Invoice Number'}
+REQUIRED_GELATO = {'Packages Order Number', 'Packages Tracking Number', 'Packages First Scan Date'}
+REQUIRED_GELATO2= {'orderReferenceId', 'costTotal', 'trackingNumber', 'orderDate'}
 
 def load_vision(file):
-    if file.name.endswith('.txt'):
-        try:
-            df = pd.read_csv(file, sep='\t', encoding='cp1252')
-        except UnicodeDecodeError:
-            file.seek(0)
-            df = pd.read_csv(file, sep='\t')
-    else:
-        df = pd.read_excel(file)
-    if not validate_columns(df, REQUIRED_VISION, 'Vision Export'):
-        return None
-    df['Cost'] = pd.to_numeric(df['Cost'], errors='coerce').fillna(0)
-    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
-    df['key'] = df['Invoice'].apply(clean_key)
+    try:
+        if file.name.endswith('.txt'):
+            try:
+                df = pd.read_csv(file, sep='\t', encoding='cp1252')
+            except UnicodeDecodeError:
+                file.seek(0)
+                df = pd.read_csv(file, sep='\t')
+        else:
+            df = pd.read_excel(file)
+    except Exception as ex:
+        raise ReconError(
+            code="VIS-001",
+            title="Could not open Vision file",
+            detail=f"The Vision file '{file.name}' could not be read. Error: {ex}",
+            fix="Make sure the file isn't open in another program (like Excel), isn't corrupted, "
+                "and is a .txt or .xlsx export from Printsmith Vision."
+        )
+    if df.empty:
+        raise ReconError(
+            code="VIS-002",
+            title="Vision file is empty",
+            detail=f"The file '{file.name}' opened successfully but contains no data rows.",
+            fix="Re-export the Vision report and make sure the date range contains shipments."
+        )
+    col_map = validate_columns(df, FUZZY_VISION, 'Vision Export')
+    cost_col   = col_map.get('Cost', 'Cost')
+    amount_col = col_map.get('Amount', 'Amount')
+    inv_col    = col_map.get('Invoice', 'Invoice')
+    rep_col    = col_map.get('Sales Rep', 'Sales Rep')
+    desc_col   = col_map.get('Description', 'Description')
+    date_col   = col_map.get('Pickup Date', 'Pickup Date')
+    df[cost_col]   = pd.to_numeric(df[cost_col],   errors='coerce').fillna(0)
+    df[amount_col] = pd.to_numeric(df[amount_col], errors='coerce').fillna(0)
+    if df[cost_col].sum() == 0:
+        raise ReconError(
+            code="VIS-003",
+            title="Vision file has no cost data",
+            detail=f"The Cost column in '{file.name}' is present but all values are zero or blank.",
+            fix="Check that you exported the correct report from Vision. The Digital Shipping report "
+                "should have cost values populated. If costs are genuinely zero, the reconciliation "
+                "will still run but all vendor charges will appear as mismatches."
+        )
+    df['key']           = df[inv_col].apply(clean_key)
     df['Invoice_clean'] = df['key']
     agg = df.groupby('key').agg(
-        vision_invoice=('Invoice_clean', 'first'),
-        vision_invoice_raw=('Invoice', 'first'),
-        vision_sales_rep=('Sales Rep', 'first'),
-        vision_billed=('Amount', 'sum'),
-        vision_cost=('Cost', 'sum'),
-        vision_description=('Description', 'first'),
-        vision_date=('Pickup Date', 'first')
+        vision_invoice=    ('Invoice_clean', 'first'),
+        vision_invoice_raw=(inv_col,         'first'),
+        vision_sales_rep=  (rep_col,         'first'),
+        vision_billed=     (amount_col,      'sum'),
+        vision_cost=       (cost_col,        'sum'),
+        vision_description=(desc_col,        'first'),
+        vision_date=       (date_col,        'first'),
     ).reset_index()
     return agg, df
 
@@ -242,26 +426,52 @@ def assign_unmatched_keys(df, key_col, label):
 
 def load_nin(file):
     df = read_excel_any(file)
-    if not validate_columns(df, REQUIRED_NIN, 'NIN — Courier'):
-        return None
-    df['AmountCharged'] = pd.to_numeric(df['AmountCharged'], errors='coerce').fillna(0)
-    df['key'] = df['Auth'].apply(clean_key)
+    if df.empty:
+        raise ReconError("NIN-001", "NIN file is empty",
+                         f"'{file.name}' contains no data rows.",
+                         "Re-download the NIN invoice from the portal and try again.")
+    col_map = validate_columns(df, FUZZY_NIN, 'NIN — Courier')
+    auth_col   = col_map.get('Auth', 'Auth')
+    amount_col = col_map.get('AmountCharged', 'AmountCharged')
+    inv_col    = col_map.get('InvoiceNumber', 'InvoiceNumber')
+    order_col  = col_map.get('OrderNumber', 'OrderNumber')
+    date_col   = col_map.get('Orderdate', 'Orderdate')
+    df[amount_col] = pd.to_numeric(df[amount_col], errors='coerce').fillna(0)
+    df['key'] = df[auth_col].apply(clean_key)
     df = assign_unmatched_keys(df, 'key', 'NIN')
-    df['_tracking'] = df['OrderNumber'].astype(str).str.strip()
+    df['_tracking']    = df[order_col].astype(str).str.strip()
     df['_source_file'] = file.name
+    df['_amount']  = df[amount_col]
+    df['_inv_num'] = df[inv_col]  if inv_col  in df.columns else ''
+    df['_order']   = df[order_col]
+    df['_auth']    = df[auth_col]
+    df['_date']    = df[date_col] if date_col in df.columns else None
     return df
 
 def load_wwe(file):
     df = read_excel_any(file)
-    if not validate_columns(df, REQUIRED_WWE, 'WWE — UPS'):
-        return None
-    df['Charge Total'] = pd.to_numeric(df['Charge Total'], errors='coerce').fillna(0)
-    df['key'] = df['Billing Reference 1'].apply(clean_key)
+    if df.empty:
+        raise ReconError("WWE-001", "WWE file is empty",
+                         f"'{file.name}' contains no data rows.",
+                         "Re-download the WWE/UPS invoice from the portal and try again.")
+    col_map = validate_columns(df, FUZZY_WWE, 'WWE — UPS')
+    ref_col     = col_map.get('Billing Reference 1', 'Billing Reference 1')
+    charge_col  = col_map.get('Charge Total', 'Charge Total')
+    inv_col     = col_map.get('Invoice #', 'Invoice #')
+    airbill_col = col_map.get('Airbill #', 'Airbill #')
+    date_col    = col_map.get('Ship date', 'Ship date')
+    df[charge_col] = pd.to_numeric(df[charge_col], errors='coerce').fillna(0)
+    df['key'] = df[ref_col].apply(clean_key)
     df['key'] = df['key'].apply(lambda s: re.match(r'^(\d{6,7})', s).group(1)
                                 if re.match(r'^(\d{6,7})', s) else s)
     df = assign_unmatched_keys(df, 'key', 'WWE')
-    df['_tracking'] = df['Airbill #'].astype(str).str.strip()
+    df['_tracking']    = df[airbill_col].astype(str).str.strip()
     df['_source_file'] = file.name
+    df['_amount']  = df[charge_col]
+    df['_inv_num'] = df[inv_col]     if inv_col     in df.columns else ''
+    df['_airbill'] = df[airbill_col]
+    df['_ref']     = df[ref_col]
+    df['_date']    = df[date_col]    if date_col    in df.columns else None
     return df
 
 def load_fedex(file):
@@ -273,13 +483,25 @@ def load_fedex(file):
             df = pd.read_csv(file)
     else:
         df = read_excel_any(file)
-    if not validate_columns(df, REQUIRED_FEDEX, 'FedEx'):
-        return None
-    df['Net Charge Amount USD'] = pd.to_numeric(df['Net Charge Amount USD'], errors='coerce').fillna(0)
-    df['key'] = df['Reference Notes Line 1'].apply(lambda v: clean_key(v).split('_')[0])
+    col_map = validate_columns(df, FUZZY_FEDEX, 'FedEx')
+    if df.empty:
+        raise ReconError("FDX-001", "FedEx file is empty",
+                         f"'{file.name}' contains no data rows.",
+                         "Re-download the FedEx invoice and try again.")
+    ref_col      = col_map.get('Reference Notes Line 1', 'Reference Notes Line 1')
+    charge_col   = col_map.get('Net Charge Amount USD', 'Net Charge Amount USD')
+    tracking_col = col_map.get('Shipment Tracking Number', 'Shipment Tracking Number')
+    inv_col      = col_map.get('Invoice Number', 'Invoice Number')
+    date_col     = col_map.get('Shipment Date (mm/dd/yyyy)', 'Shipment Date (mm/dd/yyyy)')
+    df[charge_col] = pd.to_numeric(df[charge_col], errors='coerce').fillna(0)
+    df['key'] = df[ref_col].apply(lambda v: clean_key(v).split('_')[0])
     df = assign_unmatched_keys(df, 'key', 'FEDEX')
-    df['_tracking'] = df['Shipment Tracking Number'].astype(str).str.strip()
+    df['_tracking']    = df[tracking_col].astype(str).str.strip()
     df['_source_file'] = file.name
+    df['_amount']  = df[charge_col]
+    df['_inv_num'] = df[inv_col]      if inv_col      in df.columns else ''
+    df['_ref']     = df[ref_col]
+    df['_date']    = df[date_col]     if date_col     in df.columns else None
     return df
 
 def load_gelato(file):
@@ -291,46 +513,56 @@ def load_gelato(file):
             df = pd.read_csv(file)
     else:
         df = read_excel_any(file)
-
-    cols = set(df.columns)
-
-    # Excel format (Packages Order Number etc.)
-    if REQUIRED_GELATO.issubset(cols):
-        if not validate_columns(df, REQUIRED_GELATO, 'Gelato'):
-            return None
-        df['Packages Gross Transaction Value'] = pd.to_numeric(
-            df['Packages Gross Transaction Value'], errors='coerce').fillna(0)
-        df['key'] = df['Packages Order Number'].apply(clean_key)
+    # Score both Gelato formats and use whichever matches better
+    _, missing_excel = build_col_map(df, FUZZY_GELATO)
+    _, missing_csv   = build_col_map(df, FUZZY_GELATO2)
+    if len(missing_excel) <= len(missing_csv):
+        col_map = validate_columns(df, FUZZY_GELATO, 'Gelato')
+        order_col    = col_map.get('Packages Order Number', 'Packages Order Number')
+        tracking_col = col_map.get('Packages Tracking Number', 'Packages Tracking Number')
+        date_col     = col_map.get('Packages First Scan Date', 'Packages First Scan Date')
+        cost_col     = col_map.get('Packages Gross Transaction Value')
+        carrier_col  = col_map.get('Packages Carrier')
+        if cost_col is None:
+            raise ReconError(
+                code="GEL-002",
+                title="Gelato file missing cost column",
+                detail=f"Could not find a column containing 'gross', 'transaction', and 'value' in '{file.name}'. "
+                       f"Columns found: {', '.join(list(df.columns)[:8])}...",
+                fix="The Gelato export format may have changed. Re-download the file and try again. "
+                    "If the problem persists, contact whoever maintains this tool."
+            )
+        df[cost_col] = pd.to_numeric(df[cost_col], errors='coerce').fillna(0)
+        df['key'] = df[order_col].apply(clean_key)
         df = assign_unmatched_keys(df, 'key', 'GELATO')
-        df['_tracking'] = df['Packages Tracking Number'].astype(str).str.strip()
+        df['_tracking']    = df[tracking_col].astype(str).str.strip()
         df['_source_file'] = file.name
-        df['_cost'] = df['Packages Gross Transaction Value']
-        df['_date'] = df['Packages First Scan Date']
-        df['_ref'] = df['Packages Order Number'].astype(str)
-        df['_carrier'] = df['Packages Carrier'] if 'Packages Carrier' in df.columns else 'Gelato'
-
-    # CSV format (orderReferenceId etc.)
-    elif REQUIRED_GELATO2.issubset(cols):
-        df['costTotal'] = pd.to_numeric(df['costTotal'], errors='coerce').fillna(0)
-        # Extract leading GSB invoice number from orderReferenceId
+        df['_cost']    = df[cost_col]
+        df['_date']    = df[date_col]
+        df['_ref']     = df[order_col].astype(str)
+        df['_carrier'] = df[carrier_col] if carrier_col else 'Gelato'
+    else:
+        col_map = validate_columns(df, FUZZY_GELATO2, 'Gelato (CSV)')
+        ref_col      = col_map.get('orderReferenceId', 'orderReferenceId')
+        cost_col     = col_map.get('costTotal', 'costTotal')
+        tracking_col = col_map.get('trackingNumber', 'trackingNumber')
+        date_col     = col_map.get('orderDate', 'orderDate')
+        df[cost_col] = pd.to_numeric(df[cost_col], errors='coerce').fillna(0)
         def extract_gsb(val):
             if pd.isna(val): return ''
-            m = re.match(r'^(\d{6,7})', str(val).strip())
+            import re as _re
+            m = _re.match(r'^(\d{6,7})', str(val).strip())
             return m.group(1) if m else clean_key(val)
-        df['key'] = df['orderReferenceId'].apply(extract_gsb)
+        df['key'] = df[ref_col].apply(extract_gsb)
         df = assign_unmatched_keys(df, 'key', 'GELATO')
-        df['_tracking'] = df['trackingNumber'].astype(str).str.strip()
+        df['_tracking']    = df[tracking_col].astype(str).str.strip()
         df['_source_file'] = file.name
-        df['_cost'] = df['costTotal']
-        df['_date'] = df['orderDate']
-        df['_ref'] = df['orderReferenceId'].astype(str)
-        df['_carrier'] = df['shippingMethodCarrier'] if 'shippingMethodCarrier' in df.columns else 'Gelato'
-    else:
-        st.error("The Gelato file format wasn't recognized. Expected either the Excel export (Packages Order Number) or CSV export (orderReferenceId).")
-        return None
-
+        df['_cost']    = df[cost_col]
+        df['_date']    = df[date_col]
+        df['_ref']     = df[ref_col].astype(str)
+        carrier_col    = 'shippingMethodCarrier'
+        df['_carrier'] = df[carrier_col] if carrier_col in df.columns else 'Gelato'
     return df
-
 def agg_gelato(df):
     return df.groupby('key').agg(
         gelato_actual_cost=('_cost', 'sum'),
@@ -341,7 +573,7 @@ def agg_gelato(df):
     ).reset_index()
 
 def detect_vendor(file):
-    """Read column headers only and return which vendor this file belongs to."""
+    """Read column headers and identify vendor using fuzzy matching."""
     try:
         if file.name.lower().endswith('.csv'):
             try:
@@ -356,26 +588,20 @@ def detect_vendor(file):
                 file.seek(0)
                 df = pd.read_excel(file, nrows=1, engine='xlrd')
         file.seek(0)
-        cols = set(df.columns)
-        if REQUIRED_NIN.issubset(cols):              return 'nin'
-        if REQUIRED_WWE.issubset(cols):              return 'wwe'
-        if REQUIRED_FEDEX.issubset(cols):            return 'fedex'
-        if REQUIRED_GELATO.issubset(cols):           return 'gelato'
-        if REQUIRED_GELATO2.issubset(cols):          return 'gelato'
-        return 'unknown'
+        best_vendor = 'unknown'
+        best_score  = 0
+        for vendor, spec in [('nin', FUZZY_NIN), ('wwe', FUZZY_WWE),
+                              ('fedex', FUZZY_FEDEX), ('gelato', FUZZY_GELATO),
+                              ('gelato', FUZZY_GELATO2)]:
+            _, missing = build_col_map(df, spec)
+            score = (len(spec) - len(missing)) / len(spec)
+            if score > best_score:
+                best_score  = score
+                best_vendor = vendor
+        return best_vendor if best_score >= 0.6 else 'unknown'
     except Exception:
         file.seek(0)
         return 'unknown'
-    """Load multiple files for the same vendor and combine into one dataframe.
-    Keeps all rows — duplicates are flagged, never deleted."""
-    frames = []
-    for f in file_list:
-        df = load_fn(f)
-        if df is not None:
-            frames.append(df)
-    if not frames:
-        return None
-    return pd.concat(frames, ignore_index=True)
 
 def combine_vendor_files(file_list, load_fn):
     """Load multiple files for the same vendor and combine into one dataframe.
@@ -425,29 +651,29 @@ def flag_duplicates(df, tracking_col, cost_col, date_col, ref_col, label):
 
 def agg_nin(df):
     return df.groupby('key').agg(
-        nin_invoice_num=('InvoiceNumber', 'first'),
-        nin_actual_cost=('AmountCharged', 'sum'),
-        nin_shipments=('OrderNumber', 'count'),
-        nin_raw_ref=('Auth', 'first'),
-        nin_date=('Orderdate', 'first')
+        nin_invoice_num=('_inv_num', 'first'),
+        nin_actual_cost=('_amount', 'sum'),
+        nin_shipments=('_order', 'count'),
+        nin_raw_ref=('_auth', 'first'),
+        nin_date=('_date', 'first')
     ).reset_index()
 
 def agg_wwe(df):
     return df.groupby('key').agg(
-        wwe_invoice_num=('Invoice #', 'first'),
-        wwe_actual_cost=('Charge Total', 'sum'),
-        wwe_shipments=('Airbill #', 'count'),
-        wwe_raw_ref=('Billing Reference 1', 'first'),
-        wwe_date=('Ship date', 'first')
+        wwe_invoice_num=('_inv_num', 'first'),
+        wwe_actual_cost=('_amount', 'sum'),
+        wwe_shipments=('_airbill', 'count'),
+        wwe_raw_ref=('_ref', 'first'),
+        wwe_date=('_date', 'first')
     ).reset_index()
 
 def agg_fedex(df):
     return df.groupby('key').agg(
-        fedex_invoice_num=('Invoice Number', 'first'),
-        fedex_actual_cost=('Net Charge Amount USD', 'sum'),
-        fedex_shipments=('Shipment Tracking Number', 'count'),
-        fedex_raw_ref=('Reference Notes Line 1', 'first'),
-        fedex_date=('Shipment Date (mm/dd/yyyy)', 'first')
+        fedex_invoice_num=('_inv_num', 'first'),
+        fedex_actual_cost=('_amount', 'sum'),
+        fedex_shipments=('_tracking', 'count'),
+        fedex_raw_ref=('_ref', 'first'),
+        fedex_date=('_date', 'first')
     ).reset_index()
 
 def assign_status(row):
@@ -1047,9 +1273,14 @@ if st.button("Run Reconciliation", disabled=not ready):
                 else:                           unknown_files.append(f)
 
             if unknown_files:
-                st.warning(f"Could not identify {len(unknown_files)} file(s): "
-                           f"{', '.join(f.name for f in unknown_files)}. "
-                           f"These were skipped. Make sure they are NIN, WWE, FedEx, or Gelato exports.")
+                for uf in unknown_files:
+                    st.warning(
+                        f"⚠ **Could not identify:** `{uf.name}` — this file was skipped. "
+                        f"The tool supports NIN (.xls/.xlsx), WWE (.xls/.xlsx), "
+                        f"FedEx (.csv/.xls/.xlsx), and Gelato (.xlsx/.csv) exports. "
+                        f"If this is a supported file, the column names may have changed — "
+                        f"contact whoever maintains this tool."
+                    )
 
             has_nin    = len(nin_files) > 0
             has_wwe    = len(wwe_files) > 0
@@ -1057,8 +1288,15 @@ if st.button("Run Reconciliation", disabled=not ready):
             has_gelato = len(gelato_files) > 0
 
             if not (has_nin or has_wwe or has_fedex or has_gelato):
-                st.error("No recognizable vendor files found. Please upload at least one NIN, WWE, FedEx, or Gelato invoice.")
-                st.stop()
+                raise ReconError(
+                    code="RUN-001",
+                    title="No recognizable vendor files uploaded",
+                    detail="None of the uploaded files could be identified as a NIN, WWE, FedEx, or Gelato invoice.",
+                    fix="Check that you're uploading the correct vendor invoice files. "
+                        "Supported formats: NIN (.xls/.xlsx), WWE (.xls/.xlsx), "
+                        "FedEx (.csv/.xls/.xlsx), Gelato (.xlsx/.csv). "
+                        "If a file is being skipped, check the warning message above it for details."
+                )
 
             # Show what was detected
             detected = []
@@ -1069,45 +1307,54 @@ if st.button("Run Reconciliation", disabled=not ready):
             st.info(f"Detected: {', '.join(detected)}")
 
             vision_agg, vision_raw = load_vision(vision_file)
-            if vision_agg is None:
-                st.stop()
-
             merged = vision_agg.copy()
             all_dup_frames = []
 
             if has_wwe:
                 wwe_combined = combine_vendor_files(wwe_files, load_wwe)
-                if wwe_combined is None: st.stop()
+                if wwe_combined is None:
+                    raise ReconError("WWE-002", "No WWE data loaded",
+                                     "All WWE files failed to load.",
+                                     "Check the WWE files and try again.")
                 wwe_combined, wwe_dups = flag_duplicates(
-                    wwe_combined, '_tracking', 'Charge Total', 'Ship date',
-                    'Billing Reference 1', 'WWE / UPS')
+                    wwe_combined, '_tracking', '_amount', '_date',
+                    '_ref', 'WWE / UPS')
                 if not wwe_dups.empty: all_dup_frames.append(wwe_dups)
                 wwe_agg = agg_wwe(wwe_combined)
                 merged = merged.merge(wwe_agg, on='key', how='outer')
 
             if has_nin:
                 nin_combined = combine_vendor_files(nin_files, load_nin)
-                if nin_combined is None: st.stop()
+                if nin_combined is None:
+                    raise ReconError("NIN-002", "No NIN data loaded",
+                                     "All NIN files failed to load.",
+                                     "Check the NIN files and try again.")
                 nin_combined, nin_dups = flag_duplicates(
-                    nin_combined, '_tracking', 'AmountCharged', 'Orderdate',
-                    'Auth', 'NIN (Courier)')
+                    nin_combined, '_tracking', '_amount', '_date',
+                    '_auth', 'NIN (Courier)')
                 if not nin_dups.empty: all_dup_frames.append(nin_dups)
                 nin_agg = agg_nin(nin_combined)
                 merged = merged.merge(nin_agg, on='key', how='outer')
 
             if has_fedex:
                 fedex_combined = combine_vendor_files(fedex_files, load_fedex)
-                if fedex_combined is None: st.stop()
+                if fedex_combined is None:
+                    raise ReconError("FDX-002", "No FedEx data loaded",
+                                     "All FedEx files failed to load.",
+                                     "Check the FedEx files and try again.")
                 fedex_combined, fedex_dups = flag_duplicates(
-                    fedex_combined, '_tracking', 'Net Charge Amount USD',
-                    'Shipment Date (mm/dd/yyyy)', 'Reference Notes Line 1', 'FedEx')
+                    fedex_combined, '_tracking', '_amount', '_date',
+                    '_ref', 'FedEx')
                 if not fedex_dups.empty: all_dup_frames.append(fedex_dups)
                 fedex_agg = agg_fedex(fedex_combined)
                 merged = merged.merge(fedex_agg, on='key', how='outer')
 
             if has_gelato:
                 gelato_combined = combine_vendor_files(gelato_files, load_gelato)
-                if gelato_combined is None: st.stop()
+                if gelato_combined is None:
+                    raise ReconError("GEL-004", "No Gelato data loaded",
+                                     "All Gelato files failed to load.",
+                                     "Check the Gelato files and try again.")
                 gelato_combined, gelato_dups = flag_duplicates(
                     gelato_combined, '_tracking', '_cost', '_date',
                     '_ref', 'Gelato')
@@ -1121,6 +1368,17 @@ if st.button("Run Reconciliation", disabled=not ready):
                          if c in merged.columns]
             has_any_value = merged[cost_cols].notna().any(axis=1)
             merged = merged[has_any_value].copy()
+
+            # Sanity check — make sure the merge produced something
+            if merged.empty:
+                raise ReconError(
+                    code="RUN-002",
+                    title="No data after merging files",
+                    detail="The Vision export and vendor invoices were loaded but produced no rows after merging. "
+                           "This usually means the date ranges don't overlap at all.",
+                    fix="Check that the Vision export and vendor invoices cover the same billing period. "
+                        "The date ranges for each file are shown after you run the tool."
+                )
 
             if has_wwe:    merged['wwe_diff']    = (merged['wwe_actual_cost']    - merged['vision_cost']).round(2)
             if has_nin:    merged['nin_diff']    = (merged['nin_actual_cost']    - merged['vision_cost']).round(2)
@@ -1168,9 +1426,10 @@ if st.button("Run Reconciliation", disabled=not ready):
                 use_container_width=True
             )
 
+        except ReconError as e:
+            show_error(e)
         except Exception as e:
-            st.error(f"Something went wrong: {e}")
-            st.info("Make sure your files match the expected format and try again.")
+            show_error(e)
 
 elif not ready:
     if not vision_file:
